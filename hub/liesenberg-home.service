@@ -1,0 +1,17 @@
+[Unit]
+Description=Liesenberg Home Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=/opt/liesenberg-home
+# nur für ältere Installationen (wird beim ersten Start nach config.json übernommen)
+EnvironmentFile=-/etc/liesenberg-home.env
+Environment=HUB_DATA_DIR=/opt/liesenberg-home
+ExecStart=/opt/liesenberg-home/venv/bin/uvicorn house_server:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

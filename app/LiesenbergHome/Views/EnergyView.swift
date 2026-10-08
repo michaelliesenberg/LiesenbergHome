@@ -1,0 +1,280 @@
+import SwiftUI
+import Charts
+
+struct EnergyView: View {
+    @Environment(EnergyStore.self) private var e
+
+    var body: some View {
+        Screen(title: "Energie") {
+            PowerFlowView()
+                .frame(height: 330)
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Selbstversorgt jetzt").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
+                    Text(e.online ? "\(Int(e.selfSufficiency * 100)) %" : "–").font(.system(size: 28, weight: .semibold, design: .rounded))
+                    ProgressView(value: e.online ? e.selfSufficiency : 0).tint(Theme.solar)
+                }
+                .card()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Akku reicht bis").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
+                    Group {
+                        if let t = e.batteryEmptyAt { Text(t, format: .dateTime.hour().minute()) }
+                        else { Text(e.batteryCharging ? "lädt" : (e.batteryKWh < 0.1 ? "leer" : "–")) }
+                    }
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    ProgressView(value: e.batterySoc / 100).tint(Theme.battery)
+                    Text(String(format: "%.1f von %.1f kWh", e.batteryKWh, e.batteryCapacityKWh))
+                        .font(.caption2).foregroundStyle(Theme.muted)
+                }
+                .card()
+            }
+
+            ProductionChart()
+
+            if !e.online {
+                Label("Keine Verbindung zum Hub", systemImage: "wifi.slash")
+                    .font(.footnote).foregroundStyle(Theme.heat)
+            }
+        }
+    }
+}
+
+// MARK: - Haus & Schuppen mit Energiefluss (wie in der Tesla-App)
+// Seitenansicht: Pultdach mit Modulen (erste PV-Quelle in evcc). Gibt es eine zweite PV-Quelle,
+// erscheint daneben ein zweites Gebäude (Satteldach, Module beidseitig). Namen = Titel in evcc.
+
+struct PowerFlowView: View {
+    @Environment(EnergyStore.self) private var e
+
+    private let panel = Color(hex: 0x1F4E6B)      // Modulblau wie in deiner Skizze
+    private let panelLine = Color(hex: 0x0F2D40)
+
+    // Bewusst ohne Dauer-Animation: die hat auf dem Mac alles lahmgelegt.
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            let g: CGFloat = 236                                   // Boden
+            // Haus
+            let hw = min(170, w * 0.44), hx = w * 0.38
+            let x0 = hx - hw / 2, x1 = hx + hw / 2
+            let yl = g - 60, yr = g - 92                            // Dach: West niedrig, Ost hoch
+            // Schuppen
+            let sw = min(104, w * 0.27), sx = w * 0.80
+            let s0 = sx - sw / 2, s1 = sx + sw / 2
+            let sEave = g - 42, sPeak = g - 70
+            // Akku im Haus
+            let bat = CGPoint(x: x1 - 20, y: g - 22)
+
+            ZStack {
+                RadialGradient(colors: [Theme.card2, Theme.bg], center: .center, startRadius: 10, endRadius: w * 0.6)
+                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+                // Solar → Dächer
+                flow(from: CGPoint(x: hx, y: 104), to: CGPoint(x: hx, y: (yl + yr) / 2 - 12), color: Theme.solar,
+                     active: e.pvHouse > 30, reverse: false)
+                if e.hasSecondBuilding {
+                    flow(from: CGPoint(x: sx, y: 104), to: CGPoint(x: sx, y: sPeak - 10), color: Theme.solar,
+                         active: e.pvShed > 30, reverse: false)
+                }
+                // Netz, Akku, Verbrauch (unten)
+                flow(from: CGPoint(x: x0, y: g - 14), to: CGPoint(x: 52, y: h - 58), color: Theme.grid,
+                     active: abs(e.grid) > 50, reverse: e.grid > 0)   // Bezug: Pfeil zum Haus
+                flow(from: CGPoint(x: bat.x, y: g), to: CGPoint(x: w - 52, y: h - 58), color: Theme.battery,
+                     active: abs(e.battery) > 50, reverse: e.battery > 0)
+                flow(from: CGPoint(x: hx - 20, y: g), to: CGPoint(x: hx - 20, y: h - 58), color: Theme.text,
+                     active: e.home > 50, reverse: false)
+
+                // Boden
+                Rectangle().fill(Theme.line).frame(width: w - 48, height: 1.5).position(x: w / 2, y: g)
+
+                // Haus: Wände + Pultdach
+                Path { p in
+                    p.move(to: CGPoint(x: x0, y: g)); p.addLine(to: CGPoint(x: x0, y: yl))
+                    p.addLine(to: CGPoint(x: x1, y: yr)); p.addLine(to: CGPoint(x: x1, y: g)); p.closeSubpath()
+                }
+                .fill(Theme.card).overlay(Path { p in
+                    p.move(to: CGPoint(x: x0, y: g)); p.addLine(to: CGPoint(x: x0, y: yl))
+                    p.addLine(to: CGPoint(x: x1, y: yr)); p.addLine(to: CGPoint(x: x1, y: g))
+                }.stroke(Color(hex: 0x3A3E46), lineWidth: 1.5))
+                panels(from: CGPoint(x: x0 - 6, y: yl + 1), to: CGPoint(x: x1 + 6, y: yr - 1), count: 8, active: e.pvHouse > 30)
+                // Fenster & Tür
+                RoundedRectangle(cornerRadius: 2).fill(Color(hex: 0x2A2F38)).frame(width: 22, height: 38)
+                    .position(x: x0 + 34, y: g - 19)
+                ForEach(0..<2) { i in
+                    RoundedRectangle(cornerRadius: 2).fill(Color(hex: 0x2A2F38)).frame(width: 26, height: 20)
+                        .position(x: x0 + 72 + CGFloat(i) * 36, y: g - 46)
+                }
+
+                if e.hasSecondBuilding {
+                    // Schuppen: Wände + Satteldach, Module beidseitig (Nord/Süd)
+                    Path { p in
+                        p.move(to: CGPoint(x: s0, y: g)); p.addLine(to: CGPoint(x: s0, y: sEave))
+                        p.addLine(to: CGPoint(x: sx, y: sPeak)); p.addLine(to: CGPoint(x: s1, y: sEave))
+                        p.addLine(to: CGPoint(x: s1, y: g)); p.closeSubpath()
+                    }
+                    .fill(Theme.card).overlay(Path { p in
+                        p.move(to: CGPoint(x: s0, y: g)); p.addLine(to: CGPoint(x: s0, y: sEave))
+                        p.addLine(to: CGPoint(x: sx, y: sPeak)); p.addLine(to: CGPoint(x: s1, y: sEave))
+                        p.addLine(to: CGPoint(x: s1, y: g))
+                    }.stroke(Color(hex: 0x3A3E46), lineWidth: 1.5))
+                    panels(from: CGPoint(x: s0 - 5, y: sEave + 1), to: CGPoint(x: sx - 2, y: sPeak + 1), count: 3, active: e.pvShed > 30)
+                    panels(from: CGPoint(x: sx + 2, y: sPeak + 1), to: CGPoint(x: s1 + 5, y: sEave + 1), count: 3, active: e.pvShed > 30)
+                    RoundedRectangle(cornerRadius: 2).fill(Color(hex: 0x2A2F38)).frame(width: 26, height: 30)
+                        .position(x: sx, y: g - 15)
+                }
+
+                // Akku an der Wand
+                RoundedRectangle(cornerRadius: 3).fill(Color(hex: 0x123326))
+                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Theme.battery, lineWidth: 1.2))
+                    .overlay(alignment: .bottom) {
+                        RoundedRectangle(cornerRadius: 1).fill(Theme.battery)
+                            .frame(width: 8, height: max(2, 32 * e.batterySoc / 100)).padding(.bottom, 3)
+                    }
+                    .frame(width: 14, height: 38).position(bat)
+
+                // Beschriftung
+                label("SOLAR", kw(e.pv), Theme.solar, big: true).position(x: w / 2, y: 30)
+                label(e.pvHouseTitle.uppercased(), kw(e.pvHouse), Theme.solar, small: true).position(x: hx, y: 84)
+                if e.hasSecondBuilding {
+                    label(e.pvShedTitle.uppercased(), kw(e.pvShed), Theme.solar, small: true).position(x: sx, y: 84)
+                }
+                label("NETZ", kw(e.grid), Theme.grid, sub: e.feedingIn ? "Einspeisung" : (e.grid > 50 ? "Bezug" : nil))
+                    .position(x: 52, y: h - 30)
+                label("VERBRAUCH", kw(e.home), Theme.text).position(x: hx - 20, y: h - 30)
+                label("AKKU", kw(e.battery), Theme.battery,
+                      sub: "\(e.batteryCharging ? "lädt · " : (e.battery > 50 ? "entlädt · " : ""))\(Int(e.batterySoc)) %")
+                    .position(x: w - 52, y: h - 30)
+            }
+        }
+    }
+
+    /// Modulreihe als schräges Band entlang der Dachlinie a→b, mit Trennlinien.
+    private func panels(from a: CGPoint, to b: CGPoint, count: Int, active: Bool) -> some View {
+        let t: CGFloat = 7   // Dicke
+        let band = Path { p in
+            p.move(to: a); p.addLine(to: b)
+            p.addLine(to: CGPoint(x: b.x, y: b.y - t)); p.addLine(to: CGPoint(x: a.x, y: a.y - t)); p.closeSubpath()
+        }
+        let dividers = Path { p in
+            for i in 1..<count {
+                let f = CGFloat(i) / CGFloat(count)
+                let x = a.x + (b.x - a.x) * f, y = a.y + (b.y - a.y) * f
+                p.move(to: CGPoint(x: x, y: y)); p.addLine(to: CGPoint(x: x, y: y - t))
+            }
+        }
+        return ZStack {
+            band.fill(panel)
+            dividers.stroke(panelLine, lineWidth: 1)
+            band.stroke(active ? Theme.solar : panelLine, lineWidth: active ? 1.2 : 1)
+        }
+    }
+
+    /// Linie a→b (Kurve). `reverse` = Strom fließt von b nach a. Pfeil zeigt zum Ziel.
+    private func flow(from a: CGPoint, to b: CGPoint, color: Color, active: Bool, reverse: Bool) -> some View {
+        let control = CGPoint(x: b.x, y: a.y)
+        let tip = reverse ? a : b
+        let back = control
+        let angle = atan2(tip.y - back.y, tip.x - back.x)
+        return ZStack {
+            Path { p in
+                p.move(to: a)
+                p.addQuadCurve(to: b, control: control)
+            }
+            .stroke(active ? color : Theme.line, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+            if active {
+                Path { p in
+                    let len: CGFloat = 9, spread: CGFloat = .pi / 7
+                    p.move(to: tip)
+                    p.addLine(to: CGPoint(x: tip.x - len * cos(angle - spread), y: tip.y - len * sin(angle - spread)))
+                    p.move(to: tip)
+                    p.addLine(to: CGPoint(x: tip.x - len * cos(angle + spread), y: tip.y - len * sin(angle + spread)))
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+            }
+        }
+    }
+
+    private func label(_ title: String, _ value: String, _ color: Color, big: Bool = false, small: Bool = false,
+                       sub: String? = nil) -> some View {
+        VStack(spacing: 1) {
+            Text(title).font(.system(size: small ? 10 : 11, weight: .semibold)).kerning(0.6).foregroundStyle(Theme.muted)
+            (Text(value).font(.system(size: big ? 24 : (small ? 16 : 20), weight: .semibold, design: .rounded))
+             + Text(" kW").font(.system(size: small ? 10 : 12, weight: .semibold)))
+                .foregroundStyle(color).monospacedDigit()
+            if let sub, !sub.isEmpty { Text(sub).font(.system(size: 11)).foregroundStyle(Theme.muted) }
+        }
+        .fixedSize()
+    }
+}
+
+// MARK: - Tagesverlauf als Linie
+
+struct ProductionChart: View {
+    @Environment(EnergyStore.self) private var e
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Heute erzeugt").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(String(format: "%.1f kWh", e.producedTodayKWh))
+                    .font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(Theme.solar)
+            }
+            Chart {
+                ForEach(e.forecast) { s in
+                    LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Prognose"))
+                        .foregroundStyle(Theme.faint)
+                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 4]))
+                        .interpolationMethod(.catmullRom)
+                }
+                ForEach(e.produced) { s in
+                    AreaMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000))
+                        .foregroundStyle(LinearGradient(colors: [Theme.solar.opacity(0.35), Theme.solar.opacity(0)],
+                                                        startPoint: .top, endPoint: .bottom))
+                        .interpolationMethod(.catmullRom)
+                    LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Erzeugt"))
+                        .foregroundStyle(Theme.solar)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .interpolationMethod(.catmullRom)
+                }
+                if let last = e.produced.last {
+                    PointMark(x: .value("Zeit", last.time), y: .value("kW", last.watts / 1000))
+                        .foregroundStyle(Theme.solar).symbolSize(50)
+                }
+            }
+            .chartXScale(domain: dayRange)
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
+                    AxisValueLabel(format: .dateTime.hour()).foregroundStyle(Theme.muted)
+                }
+            }
+            .chartYAxis(.hidden)
+            .frame(height: 90)
+
+            HStack(spacing: 14) {
+                legend(Theme.solar, "Erzeugt", dashed: false)
+                legend(Theme.faint, "Prognose", dashed: true)
+                Spacer()
+                if let fc = e.forecastTodayKWh {
+                    Text(String(format: "Prognose %.0f kWh", fc)).font(.caption2).foregroundStyle(Theme.muted)
+                }
+            }
+        }
+        .card()
+    }
+
+    private var dayRange: ClosedRange<Date> {
+        let cal = Calendar.current
+        let start = cal.date(bySettingHour: 6, minute: 0, second: 0, of: .now) ?? .now
+        let end = cal.date(bySettingHour: 20, minute: 0, second: 0, of: .now) ?? .now
+        return start...end
+    }
+
+    private func legend(_ c: Color, _ t: String, dashed: Bool) -> some View {
+        HStack(spacing: 6) {
+            Capsule().fill(c).frame(width: 14, height: 2.5).opacity(dashed ? 0.7 : 1)
+            Text(t).font(.caption2).foregroundStyle(Theme.muted)
+        }
+    }
+}

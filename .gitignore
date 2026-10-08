@@ -1,0 +1,14 @@
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+__pycache__/
+*.pyc
+venv/
+# private Hausdaten – niemals hochladen
+*.lxp
+*.env
+config.json
+people.json
+*-tokens.json

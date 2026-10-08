@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Kleine Helfer mit Administratorrechten für die Einrichtungsseite.
+# Der Hub-Dienst darf NUR dieses Skript per sudo aufrufen (siehe /etc/sudoers.d/liesenberg-hub)
+# und nur mit den unten aufgeführten, festen Befehlen – keine freien Argumente.
+set -u
+HUB_DIR=/opt/liesenberg-home
+SERVICE=liesenberg-home
+PORT=8080
+REPO=https://github.com/michaelliesenberg/LiesenbergHome
+BRANCH=main
+
+case "${1:-}" in
+  ts-status)
+    if ! command -v tailscale >/dev/null; then echo '{"installed":false}'; exit 0; fi
+    tailscale status --json 2>/dev/null || echo '{"installed":true,"BackendState":"Stopped"}'
+    ;;
+  ts-install)
+    curl -fsSL https://tailscale.com/install.sh | sh >/tmp/hub-ts-install.log 2>&1 && echo ok || { tail -5 /tmp/hub-ts-install.log; exit 1; }
+    ;;
+  ts-login)
+    # „tailscale up" wartet auf die Anmeldung im Browser → im Hintergrund starten, Anmelde-Link ausgeben
+    name=$(printf '%s' "${2:-home-hub}" | tr -cd 'a-z0-9-' | cut -c1-40); [ -z "$name" ] && name=home-hub
+    pkill -f "tailscale up" 2>/dev/null
+    nohup tailscale up --accept-dns=false --hostname="$name" >/tmp/hub-ts-up.log 2>&1 &
+    for _ in $(seq 1 20); do
+      url=$(grep -o 'https://login.tailscale.com/[^ ]*' /tmp/hub-ts-up.log | head -1)
+      [ -n "$url" ] && { echo "$url"; exit 0; }
+      tailscale status >/dev/null 2>&1 && { echo "already"; exit 0; }
+      sleep 0.5
+    done
+    cat /tmp/hub-ts-up.log; exit 1
+    ;;
+  funnel-on)
+    out=$(timeout 20 tailscale funnel --bg "$PORT" 2>&1); rc=$?
+    echo "$out"; exit $rc
+    ;;
+  funnel-off)
+    tailscale funnel --https=443 off 2>&1 || tailscale funnel reset 2>&1
+    ;;
+  update)
+    # Update-Quelle steht fest hier im (root-eigenen) Skript – NICHT in der vom Dienst beschreibbaren config.json
+    tmp=$(mktemp -d)
+    curl -fsSL "$REPO/archive/refs/heads/$BRANCH.tar.gz" | tar xz -C "$tmp" || { echo "Download fehlgeschlagen"; exit 1; }
+    src=$(find "$tmp" -maxdepth 2 -type d -name hub | head -1)
+    [ -f "$src/house_server.py" ] || { echo "Hub-Dateien im Download nicht gefunden"; exit 1; }
+    cp "$src"/*.py "$src"/VERSION "$src"/requirements.txt "$HUB_DIR"/
+    install -m 755 -o root -g root "$src/hubctl" /usr/local/sbin/hubctl
+    rm -rf "$tmp"
+    owner=$(stat -c %U "$HUB_DIR")
+    chown -R "$owner" "$HUB_DIR"
+    sudo -u "$owner" "$HUB_DIR/venv/bin/pip" install -q -r "$HUB_DIR/requirements.txt" 2>&1 | tail -2
+    echo "Version: $(cat $HUB_DIR/VERSION 2>/dev/null)"
+    (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
+    ;;
+  restart)
+    (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
+    echo ok
+    ;;
+  logs)
+    journalctl -u "$SERVICE" -n 80 --no-pager 2>&1
+    ;;
+  *)
+    echo "usage: hubctl ts-status|ts-install|ts-login [name]|funnel-on|funnel-off|update|restart|logs"; exit 2
+    ;;
+esac
