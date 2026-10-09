@@ -42,7 +42,7 @@ Auf der Einrichtungsseite (nur aus dem Heimnetz erreichbar):
 
 ## 3. App
 
-- Aus dem App Store laden (kommt bald) oder selbst bauen: `app/LiesenbergHome.xcodeproj` in Xcode 16 öffnen → *Signing & Capabilities* → eigenes Team und eigene Bundle-ID → ▶︎.
+- **Liesenberg Home** aus dem App Store laden (kommt bald). Dieses Repository enthält nur den Hub.
 - Ohne Hub: **„Demo ansehen"** auf dem Startbildschirm.
 
 ## Sicherung & Umzug
@@ -77,8 +77,6 @@ Die App sendet Daten ausschließlich an **deinen** Hub. Es gibt keinen Server de
 
 ```
 hub/      Python-Hub (FastAPI) – install.sh, Einrichtungsseite, Geräte-Anbindungen
-app/      iOS-App (SwiftUI, iOS 17+)
-docs/     Hinweise für die App-Store-Prüfung
 ```
 
 ## Hinweise
