@@ -14,7 +14,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
   GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= ·
-  GET/PUT /api/prices (Strompreise, ändern: Besitzer + Vollzugriff) · /api/daikin · /api/appliances · /api/music …
+  GET/PUT /api/prices (Strompreise) und /api/energy/summary: Besitzer + Vollzugriff, nicht Gäste · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
@@ -503,7 +503,7 @@ def _prices():
 
 
 @app.get("/api/prices")
-def prices_get(p=Depends(person)):
+def prices_get(p=Depends(can_edit)):   # Kosten/Preise: Besitzer + Vollzugriff, nicht für Gäste
     return _prices()
 
 
@@ -529,7 +529,7 @@ async def prices_put(request: Request, p=Depends(can_edit)):
 
 
 @app.get("/api/energy/summary")
-def energy_summary(period: str = "day", date: str = "", p=Depends(person)):
+def energy_summary(period: str = "day", date: str = "", p=Depends(can_edit)):
     """Kostenübersicht Tag/Woche/Monat (kWh + Euro nach den eingetragenen Preisen)."""
     try:
         d = _elog.parse_day(date)
