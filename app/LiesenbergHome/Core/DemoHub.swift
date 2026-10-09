@@ -10,6 +10,7 @@ actor DemoHub {
     private var people: [[String: Any]]
     private var climateOn = true
     private var climateTarget = 22.0
+    private var prices: [String: Any] = ["import": 0.32, "export": 0.081, "base_month": 12.5]
     private let structure: Any
 
     private init() {
@@ -35,7 +36,7 @@ actor DemoHub {
         case ("GET", "/api/me"):
             var me: [String: Any] = [:]
             me["person"] = people.first ?? [:]
-            me["permissions"] = ["edit": true, "people": true, "restricted": true, "climate": true]
+            me["permissions"] = ["edit": true, "people": true, "restricted": true, "climate": true, "update": true]
             me["home"] = ["name": "Demo-Haus", "backend": "demo"]
             return try out(me)
         case ("GET", "/api/home"):
@@ -106,6 +107,15 @@ actor DemoHub {
             return try out(demoHistory(ds))
         case ("GET", "/api/energy/days"):
             return try out(["days": demoDays()])
+        case ("GET", "/api/energy/summary"):
+            return try out(demoSummary(query("period") ?? "day", query("date") ?? ""))
+        case ("GET", "/api/prices"):
+            return try out(prices)
+        case ("PUT", "/api/prices"):
+            var np: [String: Any] = [:]
+            for k in ["import", "export", "base_month"] { np[k] = json[k] as? Double ?? NSNull() }
+            prices = np
+            return try out(prices)
         case ("GET", "/api/daikin"):
             var unit: [String: Any] = ["id": "d1", "name": "Wohnzimmer", "mode": "cooling", "room": "Wohnzimmer"]
             unit["on"] = climateOn
@@ -178,17 +188,24 @@ actor DemoHub {
         let f = dayFactor(day)
         var rows: [[String: Any]] = []
         var t = day
-        var pvWh = 0.0, homeWh = 0.0
+        var pvWh = 0.0, homeWh = 0.0, impWh = 0.0, expWh = 0.0
+        var soc = 35.0                                     // Akku 10 kWh: lädt mittags, entlädt abends
         while t <= end {
             let h = t.timeIntervalSince(day) / 3600
             let pv = max(0, sin(.pi * (h - 6.5) / 13)) * 7200 * f
-            let home = 650.0 + (h > 18 && h < 22 ? 900 : 0)
-            rows.append(["t": t.timeIntervalSince1970, "pv": pv, "home": home, "grid": home - pv, "bat": 0.0, "soc": 60.0])
+            let home = 650.0 + (h > 18 && h < 22 ? 900 : 0) + (h > 11.5 && h < 12.5 ? 1800 : 0)
+            var bat = 0.0                                  // − laden / + entladen
+            if pv > home, soc < 100 { bat = -min(pv - home, 3000) } else if pv < home, soc > 10 { bat = min(home - pv, 2500) }
+            soc = min(100, max(10, soc - bat * 5 / 60 / 100))
+            let grid = home - pv - bat
+            rows.append(["t": t.timeIntervalSince1970, "pv": pv, "home": home, "grid": grid, "bat": bat, "soc": soc])
             pvWh += pv * 5 / 60; homeWh += home * 5 / 60
+            impWh += max(grid, 0) * 5 / 60; expWh += max(-grid, 0) * 5 / 60
             t = t.addingTimeInterval(300)
         }
-        let totals: [String: Any] = ["date": Self.dayFmt.string(from: day), "pv": (pvWh / 10).rounded() / 100, "home": (homeWh / 10).rounded() / 100,
-                                     "import": 0.0, "export": 0.0, "car": 0.0, "batIn": 0.0, "batOut": 0.0]
+        let r2 = { (wh: Double) in (wh / 10).rounded() / 100 }
+        let totals: [String: Any] = ["date": Self.dayFmt.string(from: day), "pv": r2(pvWh), "home": r2(homeWh),
+                                     "import": r2(impWh), "export": r2(expWh), "car": 0.0, "batIn": 0.0, "batOut": 0.0]
         return ["date": Self.dayFmt.string(from: day), "samples": rows, "totals": totals]
     }
 
@@ -200,6 +217,54 @@ actor DemoHub {
             tot["date"] = Self.dayFmt.string(from: d)
             return tot
         }
+    }
+
+    /// Kostenübersicht wie /api/energy/summary auf dem Hub
+    private func demoSummary(_ period: String, _ ds: String) -> [String: Any] {
+        var cal = Calendar(identifier: .iso8601); cal.timeZone = .current
+        let today = cal.startOfDay(for: Date())
+        let d = Self.dayFmt.date(from: ds).map { cal.startOfDay(for: $0) } ?? today
+        var start = d, end = d
+        if period == "week", let iv = cal.dateInterval(of: .weekOfYear, for: d) { start = iv.start; end = iv.end.addingTimeInterval(-1) }
+        if period == "month", let iv = cal.dateInterval(of: .month, for: d) { start = iv.start; end = iv.end.addingTimeInterval(-1) }
+        var tot = ["pv": 0.0, "home": 0.0, "import": 0.0, "export": 0.0]
+        var buckets: [[String: Any]] = []
+        var elapsed = 0.0
+        var cur = start
+        while cur <= end {
+            var row: [String: Any] = ["date": Self.dayFmt.string(from: cur)]
+            let t = cur <= today ? (demoHistory(Self.dayFmt.string(from: cur))["totals"] as? [String: Any] ?? [:]) : [:]
+            if cur <= today { elapsed += 1 }
+            for k in tot.keys { let v = t[k] as? Double ?? 0; row[k] = v; tot[k]! += v }
+            buckets.append(row)
+            cur = cal.date(byAdding: .day, value: 1, to: cur)!
+        }
+        if period == "day" {
+            let rows = demoHistory(Self.dayFmt.string(from: d))["samples"] as? [[String: Any]] ?? []
+            buckets = (0..<24).map { h in
+                let sel = rows.filter { Int((($0["t"] as? Double ?? 0) - d.timeIntervalSince1970) / 3600) == h }
+                func kwh(_ f: ([String: Any]) -> Double) -> Double { (sel.reduce(0) { $0 + f($1) } * 5 / 60 / 10).rounded() / 100 }
+                return ["hour": h, "pv": kwh { $0["pv"] as? Double ?? 0 }, "home": kwh { $0["home"] as? Double ?? 0 },
+                        "import": kwh { max($0["grid"] as? Double ?? 0, 0) }, "export": kwh { max(-($0["grid"] as? Double ?? 0), 0) }]
+            }
+        }
+        var totals: [String: Any] = tot.mapValues { ($0 * 100).rounded() / 100 }
+        let selfUse = max(tot["home"]! - tot["import"]!, 0)
+        totals["selfUse"] = (selfUse * 100).rounded() / 100
+        var res: [String: Any] = ["period": period, "start": Self.dayFmt.string(from: start), "end": Self.dayFmt.string(from: end)]
+        res["totals"] = totals
+        res["buckets"] = buckets
+        res["prices"] = prices
+        if let ip = prices["import"] as? Double {
+            let ep = prices["export"] as? Double ?? 0, bm = prices["base_month"] as? Double ?? 0
+            let monthDays = Double(cal.range(of: .day, in: .month, for: start)?.count ?? 30)
+            let base = bm * (period == "month" ? elapsed / monthDays : elapsed * 12 / 365)
+            let c = ["import": tot["import"]! * ip, "export": tot["export"]! * ep, "saved": selfUse * ip, "base": base]
+            var costs = c.mapValues { ($0 * 100).rounded() / 100 }
+            costs["balance"] = ((c["export"]! - c["import"]! - base) * 100).rounded() / 100
+            res["costs"] = costs
+        }
+        return res
     }
 
     private func energy() -> [String: Any] {
@@ -219,8 +284,10 @@ actor DemoHub {
         let battery = pv > home ? -min(pv - home, 3000) : min(home - pv, 2500)   // − laden / + entladen
         let grid = home - pv - battery
 
-        let pvHouse: [String: Any] = ["title": "Haus", "power": pv * 0.7]
-        let pvCarport: [String: Any] = ["title": "Carport", "power": pv * 0.3]
+        // Zwei Wechselrichter auf dem Haus, einer auf der Hütte (im Hub als Nebengebäude eingetragen)
+        let pvHouse: [String: Any] = ["title": "PV Süddach", "power": pv * 0.45, "site": "house"]
+        let pvHouse2: [String: Any] = ["title": "PV Norddach", "power": pv * 0.3, "site": "house"]
+        let pvCabin: [String: Any] = ["title": "Hütte", "power": pv * 0.25, "site": "other"]
         let bat: [String: Any] = ["power": battery, "soc": 64.0, "capacity": 10.0]
         var lp: [String: Any] = ["title": "Garage", "vehicleTitle": "Elektroauto", "mode": "pv"]
         lp["chargePower"] = 0.0
@@ -234,7 +301,7 @@ actor DemoHub {
 
         var s: [String: Any] = [:]
         s["pvPower"] = pv
-        s["pv"] = [pvHouse, pvCarport]
+        s["pv"] = [pvHouse, pvHouse2, pvCabin]
         s["homePower"] = home
         s["grid"] = ["power": grid]
         s["battery"] = bat

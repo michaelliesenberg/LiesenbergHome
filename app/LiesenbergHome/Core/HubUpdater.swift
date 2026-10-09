@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// Hub-Version prüfen und – als Besitzer – das Update direkt aus der App starten.
+/// Hub-Version prüfen und – mit Besitzer- oder Vollzugriff – das Update direkt aus der App starten.
 @MainActor
 @Observable
 final class HubUpdater {
@@ -48,6 +48,11 @@ final class HubUpdater {
         let before = installed
         do {
             _ = try await client.send("api/hub/update", method: "POST", body: Data())
+        } catch let e as ServerError {
+            // Hub hat geantwortet und abgelehnt (z. B. Hub vor 2.3: nur Besitzer) – nicht zwei Minuten warten
+            message = e.message
+            updating = false
+            return
         } catch {
             // Der Hub startet dabei neu – ein abgebrochener Aufruf ist normal; Fehler zeigt erst die Prüfung unten
         }
@@ -81,7 +86,7 @@ struct HubUpdateBanner: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if !settings.demo, updater.hubTooOld || (settings.isOwner && updater.updateAvailable) || updater.updating || updater.message != nil {
+        if !settings.demo, updater.hubTooOld || (canUpdate && updater.updateAvailable) || updater.updating || updater.message != nil {
             HStack(spacing: 12) {
                 Image(systemName: updater.updating ? "arrow.triangle.2.circlepath" : "arrow.down.circle.fill")
                     .font(.title3).foregroundStyle(Theme.solar)
@@ -91,7 +96,7 @@ struct HubUpdateBanner: View {
                     Text(subtitle).font(.caption).foregroundStyle(Theme.muted)
                 }
                 Spacer()
-                if settings.isOwner && !updater.updating && (updater.updateAvailable || updater.hubTooOld) {
+                if canUpdate && !updater.updating && (updater.updateAvailable || updater.hubTooOld) {
                     Button("Aktualisieren") { Task { await updater.update() } }
                         .font(.caption.weight(.bold)).buttonStyle(.borderedProminent).tint(Theme.solar).foregroundStyle(Theme.bg)
                 }
@@ -99,6 +104,9 @@ struct HubUpdateBanner: View {
             .card(padding: 12)
         }
     }
+
+    /// Besitzer und Vollzugriff (Gäste nicht) – so wie der Hub ab 2.3 prüft
+    private var canUpdate: Bool { settings.permissions.edit }
 
     private var title: String {
         if updater.updating { return "Hub wird aktualisiert" }
@@ -111,7 +119,7 @@ struct HubUpdateBanner: View {
         let from = updater.installed ?? "?"
         let to = updater.latest ?? HubUpdater.requiredHub
         if updater.updating { return "Dauert etwa eine Minute – die App verbindet sich danach von selbst." }
-        if updater.hubTooOld && !settings.isOwner { return "Diese App braucht Hub \(HubUpdater.requiredHub) – bitte den Besitzer fragen." }
+        if updater.hubTooOld && !canUpdate { return "Diese App braucht Hub \(HubUpdater.requiredHub) – bitte den Besitzer fragen." }
         return "Version \(from) → \(to)"
     }
 }

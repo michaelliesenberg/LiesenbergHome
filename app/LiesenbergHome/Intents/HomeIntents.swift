@@ -149,7 +149,7 @@ struct BlindDownIntent: AppIntent {
 /// Tore & Türöffner: nur bei entsperrtem iPhone (wie in Apples Home-App).
 struct TriggerGateIntent: AppIntent {
     static var title: LocalizedStringResource = "Tor / Tür auslösen"
-    static var description = IntentDescription("Öffnet oder schließt ein Tor. Funktioniert nur bei entsperrtem iPhone.")
+    static var description = IntentDescription("Öffnet oder schließt ein Tor. Funktioniert nur bei entsperrtem Gerät.")
     static var authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
     @Parameter(title: "Tor") var device: DeviceEntity
     static var parameterSummary: some ParameterSummary { Summary("\(\.$device) auslösen") }

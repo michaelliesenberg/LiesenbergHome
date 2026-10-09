@@ -419,7 +419,65 @@ def attach(app, ctx):
         url = hub_config.get("evcc.url")
         form = _form("/setup/save/evcc", _field("url", "evcc-Adresse", url, placeholder="http://192.168.1.20:7070",
                                                  help_="Leer lassen und „Suchen“ drücken – der Hub sucht evcc im Heimnetz."), csrf, "Speichern / Suchen")
-        return _page("Energie", _flash(tok) + f'<div class=card><h2>evcc</h2><p class=muted>PV, Akku, Netz und Wallbox kommen aus <a style="color:var(--sun)" href="https://evcc.io">evcc</a>.</p>{form}</div>', "energie", csrf)
+        sites = _pv_sites_card(url, csrf)
+        pr = hub_config.get("prices", {}) or {}
+        fmt = lambda v: "" if v is None else str(v).replace(".", ",")
+        prices = _form("/setup/save/prices",
+                       '<div class=row><div>' + _field("import", "Bezugspreis (€/kWh)", fmt(pr.get("import")), placeholder="0,32")
+                       + '</div><div>' + _field("export", "Einspeisevergütung (€/kWh)", fmt(pr.get("export")), placeholder="0,08")
+                       + '</div></div>' + _field("base_month", "Grundgebühr (€/Monat, optional)", fmt(pr.get("base_month")), placeholder="12,50"),
+                       csrf)
+        prices = (f'<div class=card><h2>Strompreise</h2><p class=muted>Für die Kostenübersicht in der App (Bezug, Einspeisung, gespart). '
+                  f'Gilt für das ganze Haus – in der App können Besitzer und Vollzugriff die Preise auch ändern.</p>{prices}</div>')
+        return _page("Energie", _flash(tok) + f'<div class=card><h2>evcc</h2><p class=muted>PV, Akku, Netz und Wallbox kommen aus <a style="color:var(--sun)" href="https://evcc.io">evcc</a>.</p>{form}</div>' + sites + prices, "energie", csrf)
+
+    @app.post("/setup/save/prices")
+    async def save_prices(request: Request):
+        f = await request.form()
+        new = {}
+        for k, hi in (("import", 5), ("export", 5), ("base_month", 500)):
+            v = (f.get(k) or "").strip().replace(",", ".").replace("€", "").strip()
+            if not v:
+                new[k] = None
+                continue
+            try:
+                n = float(v)
+            except ValueError:
+                return _done(request.state.tok, "energie", False, f"Ungültige Zahl: {f.get(k)}")
+            if not 0 <= n <= hi:
+                return _done(request.state.tok, "energie", False, f"Wert außerhalb des Bereichs: {f.get(k)}")
+            new[k] = n
+        hub_config.update({"prices": new})
+        return _done(request.state.tok, "energie", True, "Strompreise gespeichert.")
+
+    def _pv_sites_card(url, csrf):
+        """Pro PV-Quelle aus evcc: gehört sie zum Haus oder zu einem Nebengebäude? (für das Bild in der App)"""
+        if not url:
+            return ""
+        try:
+            st = requests.get(url.rstrip("/") + "/api/state", timeout=5).json()
+            st = st.get("result", st)
+            titles = [s.get("title") or "" for s in st.get("pv") or [] if isinstance(s, dict)]
+        except Exception:
+            return ""
+        if not titles:
+            return ""
+        cur = hub_config.get("evcc.sites", {}) or {}
+        rows = "".join(
+            f'<div class=row><div><label>{E(t or "(ohne Namen)")}</label></div><div><select name="site::{E(t)}">'
+            f'<option value=house{"" if cur.get(t) == "other" else " selected"}>Haus</option>'
+            f'<option value=other{" selected" if cur.get(t) == "other" else ""}>Nebengebäude</option></select></div></div>'
+            for t in titles)
+        form = _form("/setup/save/pvsites", rows, csrf)
+        return (f'<div class=card><h2>Wechselrichter</h2><p class=muted>Alle Quellen „Haus“ werden in der App auf dem Hausdach zusammengezählt. '
+                f'Quellen „Nebengebäude“ erscheinen als zweites Gebäude (Name aus evcc, z. B. Hütte).</p>{form}</div>')
+
+    @app.post("/setup/save/pvsites")
+    async def save_pvsites(request: Request):
+        f = await request.form()
+        sites = {k[6:]: ("other" if v == "other" else "house") for k, v in f.items() if k.startswith("site::")}
+        hub_config.update({"evcc": {"sites": sites}})
+        return _done(request.state.tok, "energie")
 
     @app.post("/setup/save/evcc")
     async def save_evcc(request: Request):

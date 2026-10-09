@@ -31,6 +31,8 @@ struct EnergyView: View {
             }
 
             ProductionChart()
+            GridChart()
+            CostSummaryCard()
 
             if !e.online {
                 Label("Keine Verbindung zum Hub", systemImage: "wifi.slash")
@@ -41,8 +43,8 @@ struct EnergyView: View {
 }
 
 // MARK: - Haus & Schuppen mit Energiefluss (wie in der Tesla-App)
-// Seitenansicht: Pultdach mit Modulen (erste PV-Quelle in evcc). Gibt es eine zweite PV-Quelle,
-// erscheint daneben ein zweites Gebäude (Satteldach, Module beidseitig). Namen = Titel in evcc.
+// Seitenansicht: Pultdach mit Modulen (alle PV-Quellen „Haus"). Ist im Hub eine Quelle als Nebengebäude
+// eingetragen, erscheint daneben ein zweites Gebäude (Satteldach, Module beidseitig). Namen = Titel in evcc.
 
 struct PowerFlowView: View {
     @Environment(EnergyStore.self) private var e
@@ -135,7 +137,9 @@ struct PowerFlowView: View {
 
                 // Beschriftung
                 label("SOLAR", kw(e.pv), Theme.solar, big: true).position(x: w / 2, y: 30)
-                label(e.pvHouseTitle.uppercased(), kw(e.pvHouse), Theme.solar, small: true).position(x: hx, y: 84)
+                label(e.pvHouseTitle.uppercased(), kw(e.pvHouse), Theme.solar, small: true,
+                      sub: e.housePVBreakdown.isEmpty ? nil : e.housePVBreakdown.map { kw($0.power) }.joined(separator: " + "))
+                    .position(x: hx, y: e.housePVBreakdown.isEmpty ? 84 : 80)
                 if e.hasSecondBuilding {
                     label(e.pvShedTitle.uppercased(), kw(e.pvShed), Theme.solar, small: true).position(x: sx, y: 84)
                 }
@@ -229,20 +233,20 @@ struct ProductionChart: View {
             }
             Chart {
                 if e.showingToday {
-                    ForEach(e.forecast) { s in
+                    ForEach(e.forecast.filter { dayRange.contains($0.time) }) { s in
                         LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Prognose"))
                             .foregroundStyle(Theme.faint)
                             .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 4]))
                             .interpolationMethod(.catmullRom)
                     }
                 }
-                ForEach(e.consumed) { s in
+                ForEach(e.consumed.filter { dayRange.contains($0.time) }) { s in
                     LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Verbrauch"))
                         .foregroundStyle(Theme.text.opacity(0.55))
                         .lineStyle(StrokeStyle(lineWidth: 1.2))
                         .interpolationMethod(.monotone)
                 }
-                ForEach(e.produced) { s in
+                ForEach(e.produced.filter { dayRange.contains($0.time) }) { s in
                     AreaMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000))
                         .foregroundStyle(LinearGradient(colors: [Theme.solar.opacity(0.35), Theme.solar.opacity(0)],
                                                         startPoint: .top, endPoint: .bottom))
@@ -257,10 +261,14 @@ struct ProductionChart: View {
                         .foregroundStyle(Theme.solar).symbolSize(50)
                 }
             }
+            // Werte außerhalb 5–22 Uhr wegfiltern und den Plot beschneiden – sonst zeichnet Swift Charts sie
+            // über den Kartenrand hinaus (Nacht-Nullwerte links, Prognose rechts) und der Graph wirkt verschoben
             .chartXScale(domain: dayRange)
+            .chartPlotStyle { $0.clipped() }
             .chartXAxis {
                 AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
-                    AxisValueLabel(format: .dateTime.hour()).foregroundStyle(Theme.muted)
+                    AxisGridLine().foregroundStyle(Theme.line)
+                    AxisValueLabel(format: .dateTime.hour(), anchor: .top).foregroundStyle(Theme.muted)
                 }
             }
             .chartYAxis(.hidden)
@@ -296,9 +304,10 @@ struct ProductionChart: View {
         return e.historyDay.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
     }
 
-    private var dayRange: ClosedRange<Date> {
+    var dayRange: ClosedRange<Date> { Self.range(for: e.historyDay) }
+
+    static func range(for d: Date) -> ClosedRange<Date> {
         let cal = Calendar.current
-        let d = e.historyDay
         let start = cal.date(bySettingHour: 5, minute: 0, second: 0, of: d) ?? d
         let end = cal.date(bySettingHour: 22, minute: 0, second: 0, of: d) ?? d
         return start...end

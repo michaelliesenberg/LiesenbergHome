@@ -25,9 +25,15 @@ final class EnergyStore {
 
     // Leistungen in Watt (Netz: + Bezug / − Einspeisung, Akku: + Entladen / − Laden – wie evcc)
     private(set) var pv: Double = 0
-    /// Leistung je Wechselrichter (Reihenfolge wie in evcc)
-    private(set) var pvParts: [Double] = []
-    private(set) var pvTitles: [String] = []
+    struct PVSource: Identifiable {
+        let id: Int
+        let title: String
+        let power: Double
+        /// vom Hub (Einrichtung → Energie): Nebengebäude statt Haus; ältere Hubs liefern nichts → Haus
+        let otherBuilding: Bool
+    }
+    /// Wechselrichter (Reihenfolge wie in evcc)
+    private(set) var pvSources: [PVSource] = []
     private(set) var home: Double = 0
     private(set) var grid: Double = 0
     private(set) var battery: Double = 0
@@ -39,6 +45,9 @@ final class EnergyStore {
     /// Verlauf vom Hub (jede Minute aufgezeichnet) für den gewählten Tag
     private(set) var produced: [Sample] = []
     private(set) var consumed: [Sample] = []
+    /// Netz im Tagesverlauf: Bezug (positiv) und Einspeisung (positiv gezählt)
+    private(set) var gridImport: [Sample] = []
+    private(set) var gridExport: [Sample] = []
     private(set) var dayTotals = DayTotals()
     private(set) var days: [DayTotals] = []
     /// gezeigter Tag (Mitternacht); heute = Live-Ansicht mit Prognose
@@ -57,7 +66,7 @@ final class EnergyStore {
         var id: String { date }
         var day: Date? { EnergyStore.dayFmt.date(from: date) }
     }
-    private struct HistoryRow: Codable { let t: Double; let pv: Double?; let home: Double? }
+    private struct HistoryRow: Codable { let t: Double; let pv: Double?; let home: Double?; let grid: Double? }
     private struct HistoryResponse: Codable { let date: String; let samples: [HistoryRow]; let totals: DayTotals }
     private struct DaysResponse: Codable { let days: [DayTotals] }
 
@@ -82,7 +91,7 @@ final class EnergyStore {
             while !Task.isCancelled {
                 await self?.refresh()
                 // Verlauf: beim Start und danach jede Minute (der Hub zeichnet minütlich auf)
-                if tick % 20 == 0 { await self?.loadHistory() }
+                if tick % 20 == 0 { await self?.loadHistory(); await self?.loadSummary() }
                 tick += 1
                 try? await Task.sleep(for: .seconds(3))
             }
@@ -131,6 +140,8 @@ final class EnergyStore {
               let h = try? JSONDecoder().decode(HistoryResponse.self, from: data), h.date == ds else { return }
         produced = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: $0.pv ?? 0) }
         consumed = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: $0.home ?? 0) }
+        gridImport = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: max($0.grid ?? 0, 0)) }
+        gridExport = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: max(-($0.grid ?? 0), 0)) }
         dayTotals = h.totals
         if let d = try? await client.get("api/energy/days?limit=31"),
            let r = try? JSONDecoder().decode(DaysResponse.self, from: d) { days = r.days }
@@ -141,7 +152,7 @@ final class EnergyStore {
         guard day != historyDay else { return }
         historyDay = day
         followToday = Calendar.current.isDateInToday(day)
-        produced = []; consumed = []; dayTotals = DayTotals()
+        produced = []; consumed = []; gridImport = []; gridExport = []; dayTotals = DayTotals()
         Task { await loadHistory() }
     }
 
@@ -149,12 +160,90 @@ final class EnergyStore {
         if let d = Calendar.current.date(byAdding: .day, value: by, to: historyDay) { showDay(d) }
     }
 
+    // MARK: - Kostenübersicht (rechnet der Hub nach den Strompreisen des Hauses)
+
+    enum Period: String, CaseIterable, Identifiable {
+        case day, week, month
+        var id: String { rawValue }
+        var title: String { ["day": "Tag", "week": "Woche", "month": "Monat"][rawValue]! }
+        var component: Calendar.Component { ["day": .day, "week": .weekOfYear, "month": .month][rawValue]! }
+    }
+
+    struct Prices: Codable, Equatable {
+        var `import`: Double?
+        var export: Double?
+        var base_month: Double?
+        var isSet: Bool { `import` != nil }
+    }
+
+    struct Summary: Decodable {
+        struct Totals: Decodable { let pv: Double; let home: Double; let `import`: Double; let export: Double; let selfUse: Double }
+        struct Costs: Decodable { let `import`: Double; let export: Double; let saved: Double; let base: Double; let balance: Double }
+        struct Bucket: Decodable, Identifiable {
+            let hour: Int?
+            let date: String?
+            let pv: Double; let home: Double; let `import`: Double; let export: Double
+            var id: String { date ?? "h\(hour ?? 0)" }
+        }
+        let period: String
+        let start: String
+        let end: String
+        let totals: Totals
+        let buckets: [Bucket]
+        let prices: Prices
+        let costs: Costs?
+    }
+
+    var summaryPeriod: Period = .day
+    var summaryDay: Date = Calendar.current.startOfDay(for: Date())
+    private(set) var summary: Summary?
+    private(set) var prices = Prices()
+    private(set) var summaryError: String?
+
+    var summaryIsCurrent: Bool {
+        Calendar.current.isDate(summaryDay, equalTo: Date(), toGranularity: summaryPeriod.component)
+    }
+
+    func loadSummary() async {
+        let ds = Self.dayFmt.string(from: summaryDay)
+        do {
+            let data = try await client.get("api/energy/summary?period=\(summaryPeriod.rawValue)&date=\(ds)")
+            let s = try JSONDecoder().decode(Summary.self, from: data)
+            summary = s; prices = s.prices; summaryError = nil
+        } catch {
+            summaryError = (error as? ServerError)?.message ?? "Kostenübersicht braucht Hub 2.4"
+        }
+    }
+
+    func setPeriod(_ p: Period) {
+        summaryPeriod = p
+        summaryDay = Calendar.current.startOfDay(for: Date())
+        summary = nil
+        Task { await loadSummary() }
+    }
+
+    func shiftSummary(_ by: Int) {
+        guard let d = Calendar.current.date(byAdding: summaryPeriod.component, value: by, to: summaryDay), d <= Date() else { return }
+        summaryDay = d
+        summary = nil
+        Task { await loadSummary() }
+    }
+
+    func savePrices(_ p: Prices) async throws {
+        let body = try JSONEncoder().encode(p)
+        let data = try await client.send("api/prices", method: "PUT", body: body)
+        prices = (try? JSONDecoder().decode(Prices.self, from: data)) ?? p
+        await loadSummary()
+    }
+
     // MARK: - evcc-JSON lesen
 
     private func apply(_ s: [String: Any]) {
         pv = num(s["pvPower"]) ?? 0
-        pvParts = (s["pv"] as? [[String: Any]])?.compactMap { num($0["power"]) } ?? []
-        pvTitles = (s["pv"] as? [[String: Any]])?.map { ($0["title"] as? String) ?? "" } ?? []
+        pvSources = ((s["pv"] as? [[String: Any]]) ?? []).enumerated().map { i, src in
+            PVSource(id: i, title: src["title"] as? String ?? "", power: num(src["power"]) ?? 0,
+                     otherBuilding: src["site"] as? String == "other")
+        }
         home = num(s["homePower"]) ?? 0
         grid = num((s["grid"] as? [String: Any])?["power"]) ?? num(s["gridPower"]) ?? 0
         // evcc ≥ 0.300: "battery": {power, soc, capacity}; ältere: batteryPower/batterySoc
@@ -202,7 +291,7 @@ final class EnergyStore {
         // Wer „heute" anschaut, springt um Mitternacht automatisch auf den neuen Tag
         if followToday && !showingToday {
             historyDay = Calendar.current.startOfDay(for: Date())
-            produced = []; consumed = []; dayTotals = DayTotals()
+            produced = []; consumed = []; gridImport = []; gridExport = []; dayTotals = DayTotals()
             Task { await loadHistory() }
         }
     }
@@ -214,14 +303,19 @@ final class EnergyStore {
     }
 
     // MARK: Gebäude mit PV (für das Bild)
-    /// Erste PV-Quelle in evcc = Hauptdach, alle weiteren = zweites Gebäude. Namen: „title" in evcc.
-    var hasSecondBuilding: Bool { pvParts.count > 1 }
-    var pvHouse: Double { pvParts.first ?? pv }
-    var pvShed: Double { pvParts.dropFirst().reduce(0, +) }
-    var pvHouseTitle: String { short(pvTitles.first, fallback: "Dach") }
-    var pvShedTitle: String { short(pvTitles.count > 1 ? pvTitles[1] : nil, fallback: "Nebengebäude") }
+    /// Zuordnung je Quelle kommt vom Hub („site"): alle Haus-Quellen zusammen aufs Hausdach,
+    /// das zweite Gebäude nur, wenn mindestens eine Quelle dort eingetragen ist. Namen: „title" in evcc.
+    var housePV: [PVSource] { pvSources.filter { !$0.otherBuilding } }
+    var shedPV: [PVSource] { pvSources.filter(\.otherBuilding) }
+    var hasSecondBuilding: Bool { !shedPV.isEmpty }
+    var pvHouse: Double { pvSources.isEmpty ? pv : housePV.reduce(0) { $0 + $1.power } }
+    var pvShed: Double { shedPV.reduce(0) { $0 + $1.power } }
+    var pvHouseTitle: String { housePV.count == 1 ? short(housePV[0].title, fallback: "Dach") : "Dach" }
+    var pvShedTitle: String { short(shedPV.count == 1 ? shedPV[0].title : nil, fallback: "Nebengebäude") }
+    /// Mehrere Wechselrichter auf dem Haus → einzeln unter dem Dach-Label zeigen
+    var housePVBreakdown: [PVSource] { housePV.count > 1 ? housePV : [] }
 
-    private func short(_ t: String?, fallback: String) -> String {
+    func short(_ t: String?, fallback: String) -> String {
         guard var t, !t.isEmpty else { return fallback }
         t = t.replacingOccurrences(of: "PV ", with: "")
         return t.count > 18 ? String(t.prefix(17)) + "…" : t

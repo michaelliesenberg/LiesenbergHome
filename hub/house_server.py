@@ -13,10 +13,11 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"target"|"trigger"}
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
-  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/daikin · /api/appliances · /api/music …
+  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= ·
+  GET/PUT /api/prices (Strompreise, ändern: Besitzer + Vollzugriff) · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
-  GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update nur Besitzer)
+  GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import os
@@ -257,9 +258,9 @@ def home_info():
 
 
 PERMS = {
-    "owner": {"edit": True, "people": True, "restricted": True, "climate": True},
-    "full": {"edit": True, "people": False, "restricted": True, "climate": True},
-    "guest": {"edit": False, "people": False, "restricted": False, "climate": False},
+    "owner": {"edit": True, "people": True, "restricted": True, "climate": True, "update": True},
+    "full": {"edit": True, "people": False, "restricted": True, "climate": True, "update": True},
+    "guest": {"edit": False, "people": False, "restricted": False, "climate": False, "update": False},
 }
 
 
@@ -407,9 +408,16 @@ def energy(p=Depends(person)):
     try:
         r = requests.get(f"{url.rstrip('/')}/api/state", timeout=5)
         r.raise_for_status()
-        return r.json()
+        state = r.json()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"evcc nicht erreichbar: {e}")
+    # Jede PV-Quelle bekommt ihr Gebäude ("house" | "other"), eingestellt auf der Einrichtungsseite – Standard Haus
+    sites = hub_config.get("evcc.sites", {}) or {}
+    body = state.get("result", state) if isinstance(state, dict) else state
+    for src in (body.get("pv") or []) if isinstance(body, dict) else []:
+        if isinstance(src, dict):
+            src["site"] = "other" if sites.get(src.get("title") or "") == "other" else "house"
+    return state
 
 
 # ---------------------------------------------------------------- Hub-Version & Update (die App zeigt „Update verfügbar")
@@ -448,7 +456,7 @@ def hub_version(p=Depends(person)):
 
 
 @app.post("/api/hub/update")
-def hub_update(p=Depends(owner)):
+def hub_update(p=Depends(can_edit)):   # Besitzer + Vollzugriff, Gäste nicht
     """Neueste Version von GitHub holen und neu starten (dauert ca. 30–60 s)."""
     rc, out = setup_web._hubctl("update", timeout=300)
     if rc != 0:
@@ -487,6 +495,47 @@ def energy_day(date: str = "", p=Depends(person)):
     except ValueError:
         raise HTTPException(status_code=400, detail="Datum bitte als JJJJ-MM-TT")
     return energy_history.day(d)
+
+
+def _prices():
+    pr = hub_config.get("prices", {}) or {}
+    return {k: (float(pr[k]) if isinstance(pr.get(k), (int, float)) else None) for k in ("import", "export", "base_month")}
+
+
+@app.get("/api/prices")
+def prices_get(p=Depends(person)):
+    return _prices()
+
+
+@app.put("/api/prices")
+async def prices_put(request: Request, p=Depends(can_edit)):
+    """Strompreise fürs ganze Haus (Besitzer + Vollzugriff). Leere Werte = nicht gesetzt."""
+    body = await request.json()
+    new = {}
+    for k in ("import", "export", "base_month"):
+        v = body.get(k)
+        if v in (None, ""):
+            new[k] = None
+            continue
+        try:
+            v = float(str(v).replace(",", "."))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Ungültiger Preis: {k}")
+        if not 0 <= v <= (500 if k == "base_month" else 5):
+            raise HTTPException(status_code=400, detail=f"Preis außerhalb des Bereichs: {k}")
+        new[k] = v
+    hub_config.update({"prices": new})
+    return _prices()
+
+
+@app.get("/api/energy/summary")
+def energy_summary(period: str = "day", date: str = "", p=Depends(person)):
+    """Kostenübersicht Tag/Woche/Monat (kWh + Euro nach den eingetragenen Preisen)."""
+    try:
+        d = _elog.parse_day(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datum bitte als JJJJ-MM-TT")
+    return energy_history.summary(period, d, _prices())
 
 
 @app.get("/api/energy/days")

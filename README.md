@@ -64,6 +64,7 @@ Die Sicherung enthält Zugangsdaten: nur privat aufbewahren.
 | Tore & Türen | ✓ | ✓ | – |
 | Heizung & Klima verstellen | ✓ | ✓ | nur ansehen |
 | Szenen & Zeitpläne bearbeiten | ✓ | ✓ | – |
+| Hub aktualisieren | ✓ | ✓ | – |
 | Personen einladen / entfernen, Einrichtung | ✓ | – | – |
 
 Einladungen sind Einmal-Codes (48 h gültig). Auf dem Hub liegen nur Prüfsummen der Schlüssel. Entfernen sperrt sofort.

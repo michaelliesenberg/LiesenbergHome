@@ -19,7 +19,8 @@ DEFAULTS = {
     "backend": "",                        # "luxor" | "homeassistant" | ""
     "luxor": {"host": "", "user": "admin", "password": ""},
     "homeassistant": {"url": "", "token": ""},
-    "evcc": {"url": ""},
+    "evcc": {"url": "", "sites": {}},
+    "prices": {"import": None, "export": None, "base_month": None},   # €/kWh Bezug, €/kWh Einspeisung, €/Monat Grundgebühr   # sites: evcc-PV-Titel → "house" | "other" (Nebengebäude)
     "daikin": {"client_id": "", "client_secret": ""},
     "homeconnect": {"client_id": ""},
     "remote": {"mode": "", "url": ""},    # mode: "tailscale" | "custom" | ""
