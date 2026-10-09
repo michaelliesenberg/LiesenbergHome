@@ -284,6 +284,14 @@ struct SettingsView: View {
                 }
             }
 
+            if !settings.demo {
+                Section {
+                    NavigationLink { ArrivalSettingsView() } label: { Label("Ankommen & Wegfahren", systemImage: "location.circle") }
+                } footer: {
+                    Text("Beim Heimkommen fragt dein iPhone, ob das Tor aufgehen soll – auch wenn die App geschlossen ist.")
+                }
+            }
+
             Section {
                 Toggle("Mit Face ID entsperren", isOn: Binding(get: { settings.faceID }, set: { lock.setEnabled($0) }))
             } footer: {
@@ -297,7 +305,7 @@ struct SettingsView: View {
 
             Section {
                 Button(settings.demo ? "Demo beenden" : "Von diesem Zuhause abmelden", role: .destructive) {
-                    if settings.demo { AppServices.shared.disconnect() } else { confirmDisconnect = true }
+                    if settings.demo { AppServices.shared.endDemo() } else { confirmDisconnect = true }
                 }
             }
         }

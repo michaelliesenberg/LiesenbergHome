@@ -17,6 +17,8 @@ struct DashboardView: View {
                     .foregroundStyle(client.connection == .offline || client.connection == .unauthorized ? Theme.heat : Theme.muted)
             }
 
+            HubUpdateBanner()
+
             NavigationLink { EnergyView() } label: {
                 HStack(spacing: 0) {
                     stat("Solar", kw(energy.pv), Theme.solar)

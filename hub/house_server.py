@@ -13,8 +13,10 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"target"|"trigger"}
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
-  GET  /api/energy · /api/daikin · /api/appliances · /api/music …
+  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
+  GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
+  GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update nur Besitzer)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import os
@@ -408,6 +410,89 @@ def energy(p=Depends(person)):
         return r.json()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"evcc nicht erreichbar: {e}")
+
+
+# ---------------------------------------------------------------- Hub-Version & Update (die App zeigt „Update verfügbar")
+_latest = {"at": 0.0, "v": None}
+
+
+def latest_version():
+    """Neueste Hub-Version auf GitHub (höchstens einmal pro Stunde nachsehen)."""
+    if time.time() - _latest["at"] < 3600:
+        return _latest["v"]
+    _latest["at"] = time.time()
+    try:
+        repo = hub_config.get("update.repo", "")
+        if "github.com/" in repo:
+            raw = repo.replace("github.com", "raw.githubusercontent.com") + f"/{hub_config.get('update.branch', 'main')}/hub/VERSION"
+            r = requests.get(raw, timeout=5)
+            if r.ok and len(r.text.strip()) < 20:
+                _latest["v"] = r.text.strip()
+    except requests.RequestException:
+        pass
+    return _latest["v"]
+
+
+def _vtuple(v):
+    try:
+        return tuple(int(x) for x in (v or "0").split("."))
+    except ValueError:
+        return (0,)
+
+
+@app.get("/api/hub/version")
+def hub_version(p=Depends(person)):
+    latest = latest_version()
+    return {"installed": VERSION, "latest": latest,
+            "updateAvailable": bool(latest) and _vtuple(latest) > _vtuple(VERSION)}
+
+
+@app.post("/api/hub/update")
+def hub_update(p=Depends(owner)):
+    """Neueste Version von GitHub holen und neu starten (dauert ca. 30–60 s)."""
+    rc, out = setup_web._hubctl("update", timeout=300)
+    if rc != 0:
+        raise HTTPException(status_code=502, detail=f"Update fehlgeschlagen: {out[-300:]}")
+    print(f"[UPDATE] {p['name']} hat den Hub aktualisiert: {out[-80:]}", flush=True)
+    _latest["at"] = 0
+    return {"ok": True, "message": out[-200:]}
+
+
+# ---------------------------------------------------------------- Sicherung (nur Besitzer, z. B. automatisch durch die App)
+@app.get("/api/backup")
+def backup(p=Depends(owner)):
+    """Komplette Sicherung als .tgz – enthält Zugangsdaten, darum nur für den Besitzer."""
+    from fastapi.responses import Response
+    rc, data, err = setup_web._hubctl_bytes("backup")
+    if rc != 0 or len(data) < 100:
+        raise HTTPException(status_code=502, detail=f"Sicherung fehlgeschlagen: {err[-200:] or rc}")
+    name = "".join(ch for ch in (hub_config.get("home_name") or "hub") if ch.isalnum()) or "hub"
+    fn = f"hub-sicherung-{name}-{time.strftime('%Y-%m-%d')}.tgz"
+    print(f"[SICHERUNG] {p['name']} hat eine Sicherung geladen ({len(data) // 1024} KB)", flush=True)
+    return Response(data, media_type="application/gzip",
+                    headers={"Content-Disposition": f'attachment; filename="{fn}"', "Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------- Energie-Verlauf (der Hub zeichnet jede Minute auf)
+import energy_log as _elog  # noqa: E402
+
+energy_history = _elog.EnergyLog(lambda: hub_config.get("evcc.url"))
+
+
+@app.get("/api/energy/history")
+def energy_day(date: str = "", p=Depends(person)):
+    """Ein Tag (JJJJ-MM-TT, leer = heute): Minutenwerte + Summen in kWh."""
+    try:
+        d = _elog.parse_day(date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datum bitte als JJJJ-MM-TT")
+    return energy_history.day(d)
+
+
+@app.get("/api/energy/days")
+def energy_days(limit: int = 31, p=Depends(person)):
+    """Tageswerte (kWh) der letzten Tage – neuester zuerst."""
+    return {"days": energy_history.days(max(1, min(limit, 400)))}
 
 
 # ---------------------------------------------------------------- Daikin (Onecta)

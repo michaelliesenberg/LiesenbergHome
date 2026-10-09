@@ -16,7 +16,7 @@ import urllib.parse
 
 import requests
 from fastapi import Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 import hub_config
 import people
@@ -47,6 +47,33 @@ def _session(request: Request):
     if s and s["exp"] > time.time():
         return tok, s
     return None, None
+
+
+def _hubctl_bytes(*args, timeout=120):
+    """Wie _hubctl, aber liefert die Rohausgabe (für die Sicherungsdatei)."""
+    try:
+        r = subprocess.run(["sudo", "-n", "/usr/local/sbin/hubctl", *args], capture_output=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr.decode(errors="replace")
+    except FileNotFoundError:
+        return 127, b"", "hubctl fehlt (Hub mit dem Installationsskript einrichten)"
+    except subprocess.TimeoutExpired:
+        return 124, b"", "Zeitüberschreitung"
+
+
+async def _restore_upload(request):
+    """Hochgeladene Sicherung nach /tmp/hub-restore.tgz legen und einspielen."""
+    f = await request.form()
+    up = f.get("backup")
+    if not up or not getattr(up, "filename", ""):
+        return False, "Bitte eine Sicherungsdatei (.tgz) auswählen."
+    data = await up.read()
+    if len(data) > 200_000_000 or data[:2] != b"\x1f\x8b":
+        return False, "Das ist keine Sicherung des Hubs (.tgz)."
+    fd = os.open("/tmp/hub-restore.tgz", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    rc, out = _hubctl("restore", timeout=120)
+    return rc == 0, out[-300:] or ("ok" if rc == 0 else "Fehler")
 
 
 def _hubctl(*args, timeout=60):
@@ -133,7 +160,7 @@ def attach(app, ctx):
         if path.startswith("/setup"):
             if not _direct_lan(request):
                 return HTMLResponse("<h3>Die Einrichtung geht nur im Heimnetz.</h3>", status_code=403)
-            if path not in ("/setup/login", "/setup/welcome"):
+            if path not in ("/setup/login", "/setup/welcome", "/setup/welcome/restore"):
                 if not hub_config.get("setup_password_hash"):
                     return RedirectResponse("/setup/welcome", status_code=303)
                 tok, s = _session(request)
@@ -166,8 +193,22 @@ def attach(app, ctx):
         {_field('home_name', 'Name deines Zuhauses', 'Mein Zuhause', placeholder='z. B. Haus am See')}
         {_field('pw', 'Hub-Passwort (für diese Einrichtungsseite)', '', 'password', help_='Mindestens 8 Zeichen. Die App braucht es nicht.')}
         {_field('pw2', 'Passwort wiederholen', '', 'password')}
-        <button>Los geht’s</button></form></div>"""
+        <button>Los geht’s</button></form></div>
+        <div class=card><h2>Neuer Pi? Sicherung einspielen</h2>
+        <p class=muted>Hast du eine Sicherung deines alten Hubs (.tgz)? Dann ist alles wieder da – Geräte, Personen, Szenen, Anmeldungen.</p>
+        <form method=post action="/setup/welcome/restore" enctype="multipart/form-data">
+        <input type=file name=backup accept=".tgz,.gz,application/gzip"><button class=btn2>Sicherung einspielen</button></form></div>"""
         return _page("Hub einrichten", body)
+
+    @app.post("/setup/welcome/restore")
+    async def welcome_restore(request: Request):
+        if hub_config.get("setup_password_hash"):          # nur beim allerersten Start ohne Anmeldung
+            return RedirectResponse("/setup/login", status_code=303)
+        ok, msg = await _restore_upload(request)
+        if not ok:
+            return _page("Hub einrichten", f'<div class="flash err">{E(msg)}</div><a class=btn href="/setup/welcome">Zurück</a>')
+        return _page("Sicherung eingespielt", '<div class="flash ok">Sicherung eingespielt – der Hub startet neu.</div>'
+                     '<p>In etwa 20 Sekunden mit deinem bisherigen Hub-Passwort <a class=btn href="/setup/login">anmelden</a>.</p>')
 
     @app.post("/setup/welcome")
     async def welcome_save(request: Request):
@@ -604,10 +645,89 @@ def attach(app, ctx):
         upd = (f'<p>Installiert: <b>{E(CTX["version"])}</b>' + (f' · Neueste: <b>{E(latest)}</b>' if latest else "") + "</p>"
                + _form("/setup/system/update", "", csrf, "Jetzt aktualisieren"))
         pw = _form("/setup/system/password", _field("pw", "Neues Hub-Passwort", "", "password") + _field("pw2", "Wiederholen", "", "password"), csrf, "Passwort ändern")
-        body = (_flash(tok) + f'<div class=card><h2>Update</h2>{upd}</div><div class=card><h2>Hub-Passwort</h2>{pw}</div>'
+        backup = ('<p class=muted>Enthält alles für eine Neuinstallation: Einstellungen, Zugangsdaten, Personen, Szenen, '
+                  'LUXOR-Projekt, Daikin/Home-Connect-Anmeldung, evcc und Caddy. <b>Wie ein Schlüssel behandeln</b> – nur privat speichern.</p>'
+                  '<a class=btn href="/setup/system/backup">Sicherung herunterladen</a>'
+                  + _form("/setup/system/restore", '<label>Sicherung einspielen</label><input type=file name=backup accept=".tgz,.gz,application/gzip">',
+                          csrf, "Einspielen", "multipart/form-data").replace("<button>", "<button class=btn2>"))
+        dcfg = hub_config.get("drive_backup") or {}
+        connected = os.path.exists(os.path.join(hub_config.DATA_DIR, "rclone.conf"))
+        last = dcfg.get("last") or "noch nie"
+        drive = ('<p class=muted>Der Hub lädt jede Nacht um 3:30 eine Sicherung in deinen Google-Drive-Ordner '
+                 '(ältere als 120 Tage werden gelöscht). So ist alles sicher, auch wenn Pi oder SD-Karte kaputtgehen.</p>')
+        if connected:
+            drive += (f'<p>Status: <span class=ok>verbunden</span> · Ordner <code>{E(dcfg.get("folder", "Hub-Sicherung"))}</code>'
+                      f' · letzte Sicherung: <b>{E(last)}</b></p>'
+                      + _form("/setup/drive/run", "", csrf, "Jetzt nach Google Drive sichern")
+                      + _form("/setup/drive/disconnect", "", csrf, "Trennen").replace("<button>", "<button class=btn2>"))
+        else:
+            drive += ('<ol class=muted style="padding-left:18px;line-height:1.7">'
+                      '<li>Am Mac im Terminal einmalig: <code>brew install rclone</code> '
+                      '(ohne Homebrew: <a style="color:var(--sun)" href="https://rclone.org/downloads/" target=_blank>rclone.org/downloads</a>)</li>'
+                      '<li>Dann: <code>rclone authorize "drive"</code> – es öffnet sich Google, mit deinem Konto anmelden und erlauben.</li>'
+                      '<li>Im Terminal erscheint ein Text, der mit <code>{"access_token"</code> beginnt – komplett kopieren und hier einfügen:</li></ol>'
+                      + _form("/setup/drive/connect",
+                              '<label>Token von rclone</label><textarea name=token rows=4 style="width:100%" placeholder=\'{"access_token":"…"}\'></textarea>'
+                              + _field("folder", "Ordner in Google Drive", "Hub-Sicherung"),
+                              csrf, "Google Drive verbinden"))
+        body = (_flash(tok) + f'<div class=card><h2>Sicherung in Google Drive</h2>{drive}</div>'
+                f'<div class=card><h2>Sicherung</h2>{backup}</div>'
+                f'<div class=card><h2>Update</h2>{upd}</div><div class=card><h2>Hub-Passwort</h2>{pw}</div>'
                 f'<div class=card><h2>Fehlersuche</h2><a class="btn btn2" href="/setup/system/logs">Protokoll anzeigen</a> '
                 f'{_form("/setup/system/restart", "", csrf, "Hub neu starten").replace("<button>", "<button class=btn2>")}</div>')
         return _page("System", body, "system", csrf)
+
+    @app.get("/setup/system/backup")
+    def do_backup(request: Request):
+        rc, data, err = _hubctl_bytes("backup")
+        if rc != 0 or len(data) < 100:
+            return _done(request.state.tok, "system", False, f"Sicherung fehlgeschlagen: {err[-200:] or rc}")
+        name = "".join(ch for ch in (hub_config.get("home_name") or "hub") if ch.isalnum()) or "hub"
+        fn = f"hub-sicherung-{name}-{time.strftime('%Y-%m-%d')}.tgz"
+        return Response(data, media_type="application/gzip",
+                        headers={"Content-Disposition": f'attachment; filename="{fn}"', "Cache-Control": "no-store"})
+
+    @app.post("/setup/system/restore")
+    async def do_restore(request: Request):
+        ok, msg = await _restore_upload(request)
+        return _done(request.state.tok, "system", ok, msg + (" – der Hub startet neu." if ok else ""))
+
+    @app.post("/setup/drive/connect")
+    async def drive_connect(request: Request):
+        f = await request.form()
+        token = (f.get("token") or "").strip()
+        # rclone gibt manchmal Text drumherum aus – nur das JSON nehmen
+        if "{" in token:
+            token = token[token.index("{"):token.rindex("}") + 1]
+        try:
+            t = json.loads(token)
+            assert t.get("access_token") and t.get("refresh_token")
+        except Exception:
+            return _done(request.state.tok, "system", False, "Das ist kein gültiger Token – bitte die ganze Zeile {\"access_token\"…} kopieren.")
+        folder = "".join(ch for ch in (f.get("folder") or "Hub-Sicherung") if ch.isalnum() or ch in " ._-")[:60] or "Hub-Sicherung"
+        path = os.path.join(hub_config.DATA_DIR, "rclone.conf")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"[gdrive]\ntype = drive\nscope = drive\ntoken = {json.dumps(t, separators=(',', ':'))}\n")
+        hub_config.update({"drive_backup": {"folder": folder}})
+        rc, out = _hubctl("drive-backup", timeout=300)
+        if rc == 0:
+            hub_config.update({"drive_backup": {"last": time.strftime("%d.%m.%Y %H:%M")}})
+            return _done(request.state.tok, "system", True, f"Verbunden – erste Sicherung liegt in Google Drive ({out[-80:]}).")
+        return _done(request.state.tok, "system", False, f"Verbunden, aber das Hochladen klappte nicht: {out[-200:]}")
+
+    @app.post("/setup/drive/run")
+    def drive_run(request: Request):
+        ok, msg = run_drive_backup()
+        return _done(request.state.tok, "system", ok, msg)
+
+    @app.post("/setup/drive/disconnect")
+    def drive_disconnect(request: Request):
+        try:
+            os.remove(os.path.join(hub_config.DATA_DIR, "rclone.conf"))
+        except OSError:
+            pass
+        return _done(request.state.tok, "system", True, "Google Drive getrennt.")
 
     @app.post("/setup/system/update")
     def do_update(request: Request):
@@ -659,3 +779,35 @@ def _find_evcc():
             if res:
                 return res
     return None
+
+
+# ====================================================================== Nächtliche Sicherung nach Google Drive
+def run_drive_backup():
+    if not os.path.exists(os.path.join(hub_config.DATA_DIR, "rclone.conf")):
+        return False, "Google Drive ist nicht verbunden."
+    rc, out = _hubctl("drive-backup", timeout=600)
+    if rc == 0:
+        hub_config.update({"drive_backup": {"last": time.strftime("%d.%m.%Y %H:%M"), "last_day": time.strftime("%Y-%m-%d")}})
+        return True, f"Gesichert: {out[-80:]}"
+    print(f"[SICHERUNG] Google Drive fehlgeschlagen: {out[-200:]}", flush=True)
+    return False, f"Fehlgeschlagen: {out[-200:]}"
+
+
+def _nightly():
+    import threading
+    def loop():
+        tried = None
+        while True:
+            now = time.localtime()
+            today = time.strftime("%Y-%m-%d", now)
+            # einmal pro Tag ab 3:30 – auch nachgeholt, wenn der Pi um 3:30 aus war (aber nicht bei jedem Neustart)
+            done = (hub_config.get("drive_backup") or {}).get("last_day") == today
+            if (now.tm_hour, now.tm_min) >= (3, 30) and not done and tried != today:
+                tried = today
+                if os.path.exists(os.path.join(hub_config.DATA_DIR, "rclone.conf")):
+                    run_drive_backup()
+            time.sleep(60)
+    threading.Thread(target=loop, daemon=True).start()
+
+
+_nightly()

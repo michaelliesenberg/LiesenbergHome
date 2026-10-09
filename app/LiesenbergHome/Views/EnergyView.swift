@@ -215,30 +215,44 @@ struct ProductionChart: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Heute erzeugt").font(.subheadline.weight(.semibold))
+            // Tag wählen: ‹ Heute ›
+            HStack(spacing: 6) {
+                Button { e.shiftDay(-1) } label: { Image(systemName: "chevron.left").frame(width: 30, height: 30) }
+                    .buttonStyle(.plain).foregroundStyle(Theme.muted)
+                Text(dayTitle).font(.subheadline.weight(.semibold))
+                Button { e.shiftDay(1) } label: { Image(systemName: "chevron.right").frame(width: 30, height: 30) }
+                    .buttonStyle(.plain).foregroundStyle(e.showingToday ? Theme.faint : Theme.muted)
+                    .disabled(e.showingToday)
                 Spacer()
                 Text(String(format: "%.1f kWh", e.producedTodayKWh))
                     .font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(Theme.solar)
             }
             Chart {
-                ForEach(e.forecast) { s in
-                    LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Prognose"))
-                        .foregroundStyle(Theme.faint)
-                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 4]))
-                        .interpolationMethod(.catmullRom)
+                if e.showingToday {
+                    ForEach(e.forecast) { s in
+                        LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Prognose"))
+                            .foregroundStyle(Theme.faint)
+                            .lineStyle(StrokeStyle(lineWidth: 2, dash: [4, 4]))
+                            .interpolationMethod(.catmullRom)
+                    }
+                }
+                ForEach(e.consumed) { s in
+                    LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Verbrauch"))
+                        .foregroundStyle(Theme.text.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 1.2))
+                        .interpolationMethod(.monotone)
                 }
                 ForEach(e.produced) { s in
                     AreaMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000))
                         .foregroundStyle(LinearGradient(colors: [Theme.solar.opacity(0.35), Theme.solar.opacity(0)],
                                                         startPoint: .top, endPoint: .bottom))
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                     LineMark(x: .value("Zeit", s.time), y: .value("kW", s.watts / 1000), series: .value("Art", "Erzeugt"))
                         .foregroundStyle(Theme.solar)
                         .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                 }
-                if let last = e.produced.last {
+                if e.showingToday, let last = e.produced.last {
                     PointMark(x: .value("Zeit", last.time), y: .value("kW", last.watts / 1000))
                         .foregroundStyle(Theme.solar).symbolSize(50)
                 }
@@ -250,24 +264,43 @@ struct ProductionChart: View {
                 }
             }
             .chartYAxis(.hidden)
-            .frame(height: 90)
+            .frame(height: 110)
+            .overlay {
+                if e.produced.isEmpty {
+                    Text(e.showingToday ? "Der Hub zeichnet ab jetzt jede Minute auf." : "Für diesen Tag gibt es keine Aufzeichnung.")
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
 
             HStack(spacing: 14) {
                 legend(Theme.solar, "Erzeugt", dashed: false)
-                legend(Theme.faint, "Prognose", dashed: true)
+                legend(Theme.text.opacity(0.55), "Verbrauch", dashed: false)
+                if e.showingToday { legend(Theme.faint, "Prognose", dashed: true) }
                 Spacer()
-                if let fc = e.forecastTodayKWh {
+                if e.showingToday, let fc = e.forecastTodayKWh {
                     Text(String(format: "Prognose %.0f kWh", fc)).font(.caption2).foregroundStyle(Theme.muted)
+                } else if e.dayTotals.home > 0 {
+                    Text(String(format: "Verbrauch %.1f kWh", e.dayTotals.home)).font(.caption2).foregroundStyle(Theme.muted)
                 }
             }
         }
         .card()
+
+        if e.days.count > 1 { DaysChart() }
+    }
+
+    private var dayTitle: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(e.historyDay) { return "Heute" }
+        if cal.isDateInYesterday(e.historyDay) { return "Gestern" }
+        return e.historyDay.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
     }
 
     private var dayRange: ClosedRange<Date> {
         let cal = Calendar.current
-        let start = cal.date(bySettingHour: 6, minute: 0, second: 0, of: .now) ?? .now
-        let end = cal.date(bySettingHour: 20, minute: 0, second: 0, of: .now) ?? .now
+        let d = e.historyDay
+        let start = cal.date(bySettingHour: 5, minute: 0, second: 0, of: d) ?? d
+        let end = cal.date(bySettingHour: 22, minute: 0, second: 0, of: d) ?? d
         return start...end
     }
 
@@ -276,5 +309,46 @@ struct ProductionChart: View {
             Capsule().fill(c).frame(width: 14, height: 2.5).opacity(dashed ? 0.7 : 1)
             Text(t).font(.caption2).foregroundStyle(Theme.muted)
         }
+    }
+}
+
+/// Tageswerte der letzten zwei Wochen – antippen zeigt den Tag oben im Graphen
+struct DaysChart: View {
+    @Environment(EnergyStore.self) private var e
+
+    private var recent: [EnergyStore.DayTotals] {
+        Array(e.days.prefix(14)).filter { $0.day != nil }.reversed()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Letzte Tage").font(.subheadline.weight(.semibold))
+                Spacer()
+                let sum = recent.reduce(0) { $0 + $1.pv }
+                Text(String(format: "%.0f kWh", sum)).font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
+            }
+            HStack(alignment: .bottom, spacing: 4) {
+                let maxPV = max(recent.map(\.pv).max() ?? 1, 1)
+                ForEach(recent) { d in
+                    let selected = d.day.map { Calendar.current.isDate($0, inSameDayAs: e.historyDay) } ?? false
+                    Button { if let day = d.day { e.showDay(day) } } label: {
+                        VStack(spacing: 4) {
+                            Text(String(format: "%.0f", d.pv)).font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                                .foregroundStyle(selected ? Theme.solar : Theme.muted)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(selected ? Theme.solar : Theme.solar.opacity(0.45))
+                                .frame(height: max(3, 70 * d.pv / maxPV))
+                            Text(d.day.map { $0.formatted(.dateTime.day()) } ?? "")
+                                .font(.system(size: 9)).foregroundStyle(Theme.faint)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(height: 100, alignment: .bottom)
+        }
+        .card()
     }
 }

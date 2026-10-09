@@ -101,6 +101,11 @@ actor DemoHub {
 
         case ("GET", "/api/energy"):
             return try out(energy())
+        case ("GET", "/api/energy/history"):
+            let ds = comps?.queryItems?.first(where: { $0.name == "date" })?.value ?? ""
+            return try out(demoHistory(ds))
+        case ("GET", "/api/energy/days"):
+            return try out(["days": demoDays()])
         case ("GET", "/api/daikin"):
             var unit: [String: Any] = ["id": "d1", "name": "Wohnzimmer", "mode": "cooling", "room": "Wohnzimmer"]
             unit["on"] = climateOn
@@ -155,6 +160,48 @@ actor DemoHub {
     }
 
     /// Sonnenkurve für heute – im Format von evcc /api/state
+    // MARK: Demo-Verlauf (erfunden: Sonnenglocke, je Tag etwas anders)
+    private static let dayFmt: DateFormatter = {
+        let f = DateFormatter(); f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f
+    }()
+
+    private func dayFactor(_ d: Date) -> Double {
+        let n = Calendar.current.ordinality(of: .day, in: .era, for: d) ?? 0
+        return 0.45 + Double((n * 37) % 55) / 100          // 0,45 … 1,0
+    }
+
+    private func demoHistory(_ ds: String) -> [String: Any] {
+        let cal = Calendar.current
+        let day = Self.dayFmt.date(from: ds).map { cal.startOfDay(for: $0) } ?? cal.startOfDay(for: Date())
+        let end = cal.isDateInToday(day) ? Date() : day.addingTimeInterval(24 * 3600)
+        let f = dayFactor(day)
+        var rows: [[String: Any]] = []
+        var t = day
+        var pvWh = 0.0, homeWh = 0.0
+        while t <= end {
+            let h = t.timeIntervalSince(day) / 3600
+            let pv = max(0, sin(.pi * (h - 6.5) / 13)) * 7200 * f
+            let home = 650.0 + (h > 18 && h < 22 ? 900 : 0)
+            rows.append(["t": t.timeIntervalSince1970, "pv": pv, "home": home, "grid": home - pv, "bat": 0.0, "soc": 60.0])
+            pvWh += pv * 5 / 60; homeWh += home * 5 / 60
+            t = t.addingTimeInterval(300)
+        }
+        let totals: [String: Any] = ["date": Self.dayFmt.string(from: day), "pv": (pvWh / 10).rounded() / 100, "home": (homeWh / 10).rounded() / 100,
+                                     "import": 0.0, "export": 0.0, "car": 0.0, "batIn": 0.0, "batOut": 0.0]
+        return ["date": Self.dayFmt.string(from: day), "samples": rows, "totals": totals]
+    }
+
+    private func demoDays() -> [[String: Any]] {
+        let cal = Calendar.current
+        return (0..<14).map { i in
+            let d = cal.date(byAdding: .day, value: -i, to: cal.startOfDay(for: Date()))!
+            var tot = (demoHistory(Self.dayFmt.string(from: d))["totals"] as? [String: Any]) ?? [:]
+            tot["date"] = Self.dayFmt.string(from: d)
+            return tot
+        }
+    }
+
     private func energy() -> [String: Any] {
         let cal = Calendar.current
         let now = Date()

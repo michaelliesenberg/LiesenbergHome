@@ -14,6 +14,8 @@ struct LiesenbergHomeApp: App {
                 .environment(s.climate)
                 .environment(s.music)
                 .environment(s.scenes)
+                .environment(s.arrival)
+                .environment(s.updater)
                 .environment(s.lock)
                 .preferredColorScheme(.dark)
                 .tint(Theme.solar)

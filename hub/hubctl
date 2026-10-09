@@ -44,6 +44,7 @@ case "${1:-}" in
     src=$(find "$tmp" -maxdepth 2 -type d -name hub | head -1)
     [ -f "$src/house_server.py" ] || { echo "Hub-Dateien im Download nicht gefunden"; exit 1; }
     cp "$src"/*.py "$src"/VERSION "$src"/requirements.txt "$HUB_DIR"/
+    command -v rclone >/dev/null || apt-get install -y -qq rclone >/dev/null 2>&1   # für die Drive-Sicherung (ab 2.1)
     install -m 755 -o root -g root "$src/hubctl" /usr/local/sbin/hubctl
     rm -rf "$tmp"
     owner=$(stat -c %U "$HUB_DIR")
@@ -51,6 +52,55 @@ case "${1:-}" in
     sudo -u "$owner" "$HUB_DIR/venv/bin/pip" install -q -r "$HUB_DIR/requirements.txt" 2>&1 | tail -2
     echo "Version: $(cat $HUB_DIR/VERSION 2>/dev/null)"
     (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
+    ;;
+  backup)
+    # Alles, was für eine Neuinstallation nötig ist, als tar.gz auf stdout (enthält Zugangsdaten!)
+    cd / || exit 1
+    list=""
+    for f in opt/liesenberg-home/*.json opt/liesenberg-home/project.lxp opt/liesenberg-home/VERSION opt/liesenberg-home/energy \
+             etc/liesenberg-home.env etc/caddy/Caddyfile etc/evcc.yaml var/lib/evcc; do
+      [ -e "$f" ] && list="$list $f"
+    done
+    # shellcheck disable=SC2086
+    tar czf - $list 2>/dev/null
+    ;;
+  restore)
+    # Sicherung aus /tmp/hub-restore.tgz einspielen (feste Datei, keine freien Pfade)
+    f=/tmp/hub-restore.tgz
+    [ -f "$f" ] || { echo "Keine Sicherung hochgeladen"; exit 1; }
+    bad=$(tar tzf "$f" 2>/dev/null | grep -vE '^(opt/liesenberg-home/[^/]+|opt/liesenberg-home/energy(/[^/]*)?|etc/liesenberg-home\.env|etc/caddy/Caddyfile|etc/evcc\.yaml|var/lib/evcc(/.*)?)$')
+    [ -z "$bad" ] || { echo "Unerwartete Dateien in der Sicherung:"; echo "$bad" | head -5; rm -f "$f"; exit 1; }
+    tar tzf "$f" >/dev/null 2>&1 || { echo "Datei ist keine gültige Sicherung"; rm -f "$f"; exit 1; }
+    tar xzf "$f" -C / --no-same-owner
+    rm -f "$f"
+    owner=$(stat -c %U "$HUB_DIR"); chown -R "$owner" "$HUB_DIR"; chmod 600 "$HUB_DIR"/*.json 2>/dev/null
+    [ -f /etc/liesenberg-home.env ] && chgrp "$owner" /etc/liesenberg-home.env && chmod 640 /etc/liesenberg-home.env
+    id evcc >/dev/null 2>&1 && [ -d /var/lib/evcc ] && chown -R evcc /var/lib/evcc
+    systemctl is-enabled evcc >/dev/null 2>&1 && systemctl restart evcc
+    command -v caddy >/dev/null && [ -f /etc/caddy/Caddyfile ] && systemctl restart caddy
+    echo "Sicherung eingespielt"
+    (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
+    ;;
+  drive-backup)
+    # Sicherung nach Google Drive (rclone, Zugang in $HUB_DIR/rclone.conf) – Ordner aus config.json, bereinigt
+    conf="$HUB_DIR/rclone.conf"
+    [ -f "$conf" ] || { echo "Google Drive ist nicht verbunden"; exit 1; }
+    command -v rclone >/dev/null || apt-get install -y -qq rclone >/dev/null 2>&1 || { echo "rclone fehlt"; exit 1; }
+    folder=$(python3 -c "import json;print(json.load(open('$HUB_DIR/config.json')).get('drive_backup',{}).get('folder','Hub-Sicherung'))" 2>/dev/null | tr -cd 'A-Za-z0-9 ._-' | cut -c1-60)
+    [ -n "$folder" ] || folder=Hub-Sicherung
+    name="hub-sicherung-$(date +%Y-%m-%d_%H%M).tgz"
+    "$0" backup | rclone --config "$conf" rcat "gdrive:$folder/$name" 2>&1 | tail -3
+    rc=${PIPESTATUS[1]}
+    [ "$rc" = 0 ] || { echo "Hochladen fehlgeschlagen"; exit 1; }
+    # alte Sicherungen nach 120 Tagen aufräumen
+    rclone --config "$conf" delete --min-age 120d "gdrive:$folder" >/dev/null 2>&1
+    echo "ok $folder/$name"
+    ;;
+  drive-test)
+    conf="$HUB_DIR/rclone.conf"
+    [ -f "$conf" ] || { echo "nicht verbunden"; exit 1; }
+    command -v rclone >/dev/null || apt-get install -y -qq rclone >/dev/null 2>&1
+    rclone --config "$conf" about gdrive: 2>&1 | head -3
     ;;
   restart)
     (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
@@ -60,6 +110,6 @@ case "${1:-}" in
     journalctl -u "$SERVICE" -n 80 --no-pager 2>&1
     ;;
   *)
-    echo "usage: hubctl ts-status|ts-install|ts-login [name]|funnel-on|funnel-off|update|restart|logs"; exit 2
+    echo "usage: hubctl ts-status|ts-install|ts-login [name]|funnel-on|funnel-off|update|backup|restore|drive-backup|drive-test|restart|logs"; exit 2
     ;;
 esac

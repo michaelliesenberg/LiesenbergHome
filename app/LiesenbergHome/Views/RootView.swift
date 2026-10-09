@@ -13,6 +13,9 @@ struct RootView: View {
         Group {
             if settings.isConnected {
                 tabs
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if settings.demo { DemoBar() }
+                    }
             } else {
                 WelcomeView()
             }
@@ -31,6 +34,7 @@ struct RootView: View {
                 guard settings.isConnected else { return }
                 energy.start()
                 Task {
+                    await AppServices.shared.updater.check()
                     await AppServices.shared.refreshMe()
                     await home.syncFromServer()
                 }
@@ -98,5 +102,22 @@ struct Screen<Content: View>: View {
         .background(Theme.bg.ignoresSafeArea())
         .navigationTitle(title)
         .toolbarBackground(Theme.bg, for: .navigationBar)
+    }
+}
+
+/// Im Demo-Modus immer sichtbar: zurück zum Startbildschirm
+struct DemoBar: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "play.circle.fill").foregroundStyle(Theme.solar)
+            Text("Demo – erfundenes Haus").font(.footnote.weight(.semibold)).foregroundStyle(Theme.text)
+            Spacer()
+            Button("Demo beenden") { AppServices.shared.endDemo() }
+                .font(.footnote.weight(.bold))
+                .buttonStyle(.borderedProminent).tint(Theme.solar).foregroundStyle(Theme.bg)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Theme.card)
     }
 }

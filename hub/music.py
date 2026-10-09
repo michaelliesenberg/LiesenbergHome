@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 
 import pyatv
-from pyatv.const import DeviceState, Protocol
+from pyatv.const import DeviceState, PairingRequirement, Protocol
 
 SCHEDULE_FILE = os.environ.get("MUSIC_SCHEDULE_FILE", "/opt/liesenberg-home/music-schedules.json")
 
@@ -53,8 +53,12 @@ class Music:
             self.error = f"Suche fehlgeschlagen: {e}"
             return
         for c in found:
-            # nur Geräte, die AirPlay sprechen (HomePod, AirPlay-Boxen, Apple TV)
-            if not c.get_service(Protocol.AirPlay):
+            # nur Geräte, die AirPlay sprechen UND ohne Kopplung steuerbar sind (HomePods, AirPlay-Boxen).
+            # Fernseher und Macs verlangen eine Kopplung („Mandatory") oder erlauben nichts („Unsupported").
+            svc = c.get_service(Protocol.AirPlay)
+            if not svc:
+                continue
+            if getattr(svc, "pairing", None) in (PairingRequirement.Mandatory, PairingRequirement.Unsupported, PairingRequirement.Disabled):
                 continue
             did = c.identifier
             self.configs[did] = c
@@ -82,16 +86,27 @@ class Music:
         try:
             atv = await self._conn(did)
             p = await atv.metadata.playing()
+            try:
+                app = atv.metadata.app            # welche App spielt (Musik, Spotify, Podcasts …)
+                app_name = app.name if app else None
+            except Exception:
+                app_name = None
+            try:
+                vol = round(atv.audio.volume)
+            except Exception:
+                vol = None
             st.update(state=STATE_DE.get(p.device_state, str(p.device_state).split(".")[-1]),
                       playing=p.device_state == DeviceState.Playing,
-                      title=p.title, artist=p.artist, album=p.album,
-                      volume=round(atv.audio.volume) if atv.audio else None, online=True)
+                      title=p.title, artist=p.artist, album=p.album, app=app_name,
+                      volume=vol, online=True, error=None)
         except Exception as e:
             st.update(online=False, state="nicht erreichbar", error=str(e)[:120])
             await self._drop(did)
 
     async def _refresh_all(self):
-        if not self.configs:
+        # neu suchen, wenn noch nichts gefunden oder alle 10 Minuten (neue Lautsprecher, geänderte Adressen)
+        if not self.configs or time.time() - getattr(self, "_scanned", 0) > 600:
+            self._scanned = time.time()
             await self._scan()
         await asyncio.gather(*(self._refresh_one(d) for d in list(self.configs)), return_exceptions=True)
 

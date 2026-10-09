@@ -17,6 +17,7 @@ struct MusicView: View {
         Screen(title: "Musik") {
             switch auth {
             case .authorized:
+                HomePlayingCard()
                 nowPlaying
                 SectionLabel(text: "Lautsprecher")
                 speakers
@@ -29,6 +30,7 @@ struct MusicView: View {
                     grid(Array(recent.prefix(6)).map { item in Tile(id: item.id.rawValue, title: item.title, artwork: item.artwork) { await play(item) } })
                 }
             case .notDetermined:
+                HomePlayingCard()
                 connectCard
             default:
                 Text("Zugriff auf Apple Music ist in den Einstellungen deaktiviert (Einstellungen → Datenschutz → Medien & Apple Music).")

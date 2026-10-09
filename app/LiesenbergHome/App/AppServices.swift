@@ -14,6 +14,8 @@ final class AppServices {
     let music: MusicServerStore
     let scenes: SceneStore
     let lock: AppLock
+    let arrival: ArrivalManager
+    let updater: HubUpdater
 
     private init() {
         settings = AppSettings()
@@ -24,6 +26,9 @@ final class AppServices {
         music = MusicServerStore(client: client)
         scenes = SceneStore(client: client)
         lock = AppLock(settings: settings)
+        // früh anlegen: iOS weckt die App bei Ankunft im Hintergrund und liefert das Ereignis sofort
+        arrival = ArrivalManager()
+        updater = HubUpdater(client: client)
     }
 
     /// Einladung einlösen (QR-Code, Link aus Nachricht oder Kamera-App)
@@ -48,6 +53,12 @@ final class AppServices {
         guard !settings.demo, let data = try? await client.get("api/me"),
               let me = try? JSONDecoder().decode(MeResponse.self, from: data) else { return }
         settings.apply(me: me)
+    }
+
+    func endDemo() {
+        settings.endDemo()
+        home.reset()
+        client.reset()
     }
 
     func disconnect() {

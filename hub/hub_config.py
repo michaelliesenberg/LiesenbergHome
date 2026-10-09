@@ -12,6 +12,7 @@ import threading
 DATA_DIR = os.environ.get("HUB_DATA_DIR", "/opt/liesenberg-home")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 LEGACY_ENV = "/etc/liesenberg-home.env"
+LEGACY_LUXOR_HOST = "192.168.178.50"     # Standard der Versionen vor 2.0 (ohne LUXOR_HOST in der env-Datei)
 
 DEFAULTS = {
     "home_name": "Mein Zuhause",
@@ -63,10 +64,13 @@ def _from_legacy():
     c = {}
     if env.get("LUXOR_PASSWORD") or env.get("LUXOR_HOST"):
         c["backend"] = "luxor"
-        c["luxor"] = {"host": env.get("LUXOR_HOST", ""), "user": env.get("LUXOR_USER", "admin"),
+        # Alte Server-Versionen hatten die IP1-Adresse fest eingebaut, wenn LUXOR_HOST fehlte
+        c["luxor"] = {"host": env.get("LUXOR_HOST") or LEGACY_LUXOR_HOST, "user": env.get("LUXOR_USER", "admin"),
                       "password": env.get("LUXOR_PASSWORD", "")}
     if env.get("EVCC_URL"):
         c["evcc"] = {"url": env["EVCC_URL"]}
+    elif env.get("APP_TOKEN") or env.get("LUXOR_PASSWORD"):
+        c["evcc"] = {"url": "http://127.0.0.1:7070"}   # Standard der Versionen vor 2.0 (evcc auf demselben Pi)
     if env.get("DAIKIN_CLIENT_ID"):
         c["daikin"] = {"client_id": env["DAIKIN_CLIENT_ID"], "client_secret": env.get("DAIKIN_CLIENT_SECRET", "")}
     if env.get("HC_CLIENT_ID"):
@@ -84,6 +88,15 @@ def load():
             try:
                 with open(CONFIG_FILE) as f:
                     _cfg = _merge(DEFAULTS, json.load(f))
+                # Reparatur für Hubs, die 2.0.0 mit leerer LUXOR-Adresse übernommen haben
+                legacy, _ = _from_legacy()
+                fixed = False
+                if _cfg.get("backend") == "luxor" and not _cfg["luxor"].get("host") and legacy.get("luxor", {}).get("host"):
+                    _cfg["luxor"]["host"] = legacy["luxor"]["host"]; fixed = True
+                if not _cfg["evcc"].get("url") and legacy.get("evcc", {}).get("url"):
+                    _cfg["evcc"]["url"] = legacy["evcc"]["url"]; fixed = True
+                if fixed:
+                    _write(_cfg)
             except (OSError, ValueError):
                 legacy, _ = _from_legacy()
                 _cfg = _merge(DEFAULTS, legacy)

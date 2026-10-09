@@ -8,7 +8,7 @@ Kostenlos, ohne Cloud-Konto beim Hersteller der App: Alles läuft über einen kl
 | | |
 |---|---|
 | **Geräte** | Theben **LUXORliving** (IP1) oder **Home Assistant** – Etagen, Räume, Licht, Dimmer, Rollläden, Heizung, Tore |
-| **Energie** | **evcc** – PV (mehrere Wechselrichter), Hausverbrauch, Akku, Netz, Wallbox, Prognose |
+| **Energie** | **evcc** – PV (mehrere Wechselrichter), Hausverbrauch, Akku, Netz, Wallbox, Prognose; der Hub zeichnet jede Minute auf (Tagesverlauf, Tageswerte) |
 | **Klima** | **Daikin** (Onecta) |
 | **Hausgeräte** | **Bosch / Siemens** (Home Connect) |
 | **Musik** | Apple Music in der App, alle **HomePods/AirPlay**-Lautsprecher, Radio-Zeitpläne |
@@ -44,6 +44,17 @@ Auf der Einrichtungsseite (nur aus dem Heimnetz erreichbar):
 
 - Aus dem App Store laden (kommt bald) oder selbst bauen: `app/LiesenbergHome.xcodeproj` in Xcode 16 öffnen → *Signing & Capabilities* → eigenes Team und eigene Bundle-ID → ▶︎.
 - Ohne Hub: **„Demo ansehen"** auf dem Startbildschirm.
+
+## Sicherung & Umzug
+
+Auf der Einrichtungsseite unter **System → Sicherung herunterladen** gibt es eine Datei mit allem, was der Hub braucht
+(Einstellungen, Zugangsdaten, Personen, Szenen, LUXOR-Projekt, Anmeldungen bei Daikin/Home Connect, evcc, Caddy).
+Geht die SD-Karte kaputt: Pi neu aufsetzen, Hub mit der Zeile oben installieren und auf der Willkommensseite
+**„Sicherung einspielen"** wählen – alle Apps funktionieren danach ohne neue Einladung weiter.
+Die Sicherung enthält Zugangsdaten: nur privat aufbewahren.
+
+**Automatisch in Google Drive:** Unter *System → Sicherung in Google Drive* einmal mit [rclone](https://rclone.org) verbinden
+(`rclone authorize "drive"` am Computer, Token einfügen) – dann lädt der Hub jede Nacht um 3:30 eine Sicherung hoch.
 
 ## Rollen
 

@@ -80,6 +80,13 @@ final class AppSettings {
         permissions = .owner
     }
 
+    /// Demo verlassen – ein evtl. vorhandener Schlüssel bleibt erhalten
+    func endDemo() {
+        demo = false
+        homeName = ""; personName = ""; personID = ""; role = "guest"
+        permissions = .guest
+    }
+
     /// Zuhause trennen (Schlüssel löschen)
     func disconnect() {
         key = ""

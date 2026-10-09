@@ -10,8 +10,11 @@ struct Speaker: Codable, Identifiable, Equatable {
     var playing: Bool?
     var title: String?
     var artist: String?
+    var album: String?
+    var app: String?          // z. B. „Musik", „Spotify", „Podcasts"
     var volume: Double?
     var online: Bool?
+    var error: String?
 }
 
 struct MusicSchedule: Codable, Identifiable, Equatable {

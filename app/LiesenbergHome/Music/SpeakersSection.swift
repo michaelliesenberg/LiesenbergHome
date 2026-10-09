@@ -205,3 +205,55 @@ struct ScheduleEditor: View {
         .preferredColorScheme(.dark)
     }
 }
+
+
+/// „Läuft zu Hause": was gerade auf HomePods / AirPlay-Lautsprechern spielt – egal, wer es gestartet hat
+struct HomePlayingCard: View {
+    @Environment(MusicServerStore.self) private var music
+
+    private var playing: [Speaker] { music.speakers.filter { $0.playing == true } }
+
+    var body: some View {
+        if !playing.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(text: "Läuft zu Hause")
+                ForEach(groups, id: \.key) { g in
+                    HStack(spacing: 12) {
+                        Image(systemName: "waveform").font(.title3).foregroundStyle(Theme.grid)
+                            .symbolEffect(.variableColor.iterative, options: .repeating)
+                            .frame(width: 44, height: 44).background(Theme.control, in: RoundedRectangle(cornerRadius: 12))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(g.first.title ?? "Unbekannter Titel").font(.subheadline.weight(.bold)).lineLimit(1)
+                            Text([g.first.artist, g.first.app].compactMap { $0 }.joined(separator: " · "))
+                                .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+                            Label(g.names, systemImage: "homepod.fill").font(.caption2.weight(.semibold))
+                                .foregroundStyle(Theme.grid).lineLimit(1)
+                        }
+                        Spacer()
+                        Button { g.speakers.forEach { music.command($0, "pause") } } label: {
+                            Image(systemName: "pause.fill").frame(width: 40, height: 40).background(Theme.control, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .card(padding: 12)
+                }
+            }
+        }
+    }
+
+    /// Gleicher Titel auf mehreren Lautsprechern (Gruppe) → eine Zeile
+    private struct PlayGroup { let key: String; let speakers: [Speaker]
+        var first: Speaker { speakers[0] }
+        var names: String { speakers.compactMap(\.name).joined(separator: ", ") }
+    }
+    private var groups: [PlayGroup] {
+        var order: [String] = []
+        var dict: [String: [Speaker]] = [:]
+        for s in playing {
+            let k = "\(s.title ?? "")|\(s.artist ?? "")"
+            if dict[k] == nil { order.append(k) }
+            dict[k, default: []].append(s)
+        }
+        return order.map { PlayGroup(key: $0, speakers: dict[$0]!) }
+    }
+}

@@ -24,7 +24,7 @@ say "Hub-Benutzer: $HUB_USER"
 
 say "Pakete installieren"
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip curl avahi-daemon >/dev/null
+apt-get install -y -qq python3 python3-venv python3-pip curl avahi-daemon rclone >/dev/null
 
 say "Hub-Dateien holen"
 SRC=""

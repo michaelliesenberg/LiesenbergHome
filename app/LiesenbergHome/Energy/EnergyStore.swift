@@ -36,7 +36,35 @@ final class EnergyStore {
     private(set) var loadpoints: [Loadpoint] = []
     private(set) var forecast: [Sample] = []
     private(set) var forecastTodayKWh: Double?
+    /// Verlauf vom Hub (jede Minute aufgezeichnet) für den gewählten Tag
     private(set) var produced: [Sample] = []
+    private(set) var consumed: [Sample] = []
+    private(set) var dayTotals = DayTotals()
+    private(set) var days: [DayTotals] = []
+    /// gezeigter Tag (Mitternacht); heute = Live-Ansicht mit Prognose
+    var historyDay: Date = Calendar.current.startOfDay(for: Date())
+    var showingToday: Bool { Calendar.current.isDateInToday(historyDay) }
+    /// true, solange der Nutzer „heute" anschaut (nicht in alten Tagen blättert)
+    private var followToday = true
+
+    struct DayTotals: Codable, Identifiable {
+        var date: String = ""
+        var pv: Double = 0
+        var home: Double = 0
+        var `import`: Double = 0
+        var export: Double = 0
+        var car: Double? = 0
+        var id: String { date }
+        var day: Date? { EnergyStore.dayFmt.date(from: date) }
+    }
+    private struct HistoryRow: Codable { let t: Double; let pv: Double?; let home: Double? }
+    private struct HistoryResponse: Codable { let date: String; let samples: [HistoryRow]; let totals: DayTotals }
+    private struct DaysResponse: Codable { let days: [DayTotals] }
+
+    static let dayFmt: DateFormatter = {
+        let f = DateFormatter(); f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f
+    }()
     private(set) var updated: Date?
     private(set) var online = false
 
@@ -45,14 +73,17 @@ final class EnergyStore {
 
     init(client: HouseClient) {
         self.client = client
-        produced = Self.loadToday()
     }
 
     func start() {
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 await self?.refresh()
+                // Verlauf: beim Start und danach jede Minute (der Hub zeichnet minütlich auf)
+                if tick % 20 == 0 { await self?.loadHistory() }
+                tick += 1
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -89,14 +120,33 @@ final class EnergyStore {
         return Date().addingTimeInterval(batteryKWh * 1000 / draw * 3600)
     }
 
-    var producedTodayKWh: Double {
-        guard produced.count > 1 else { return 0 }
-        var wh = 0.0
-        for (a, b) in zip(produced, produced.dropFirst()) {
-            let h = b.time.timeIntervalSince(a.time) / 3600
-            if h < 0.25 { wh += (a.watts + b.watts) / 2 * h }
-        }
-        return wh / 1000
+    /// Erzeugt am gezeigten Tag (vom Hub gerechnet)
+    var producedTodayKWh: Double { dayTotals.pv }
+
+    // MARK: - Verlauf vom Hub
+
+    func loadHistory() async {
+        let ds = Self.dayFmt.string(from: historyDay)
+        guard let data = try? await client.get("api/energy/history?date=\(ds)"),
+              let h = try? JSONDecoder().decode(HistoryResponse.self, from: data), h.date == ds else { return }
+        produced = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: $0.pv ?? 0) }
+        consumed = h.samples.map { Sample(time: Date(timeIntervalSince1970: $0.t), watts: $0.home ?? 0) }
+        dayTotals = h.totals
+        if let d = try? await client.get("api/energy/days?limit=31"),
+           let r = try? JSONDecoder().decode(DaysResponse.self, from: d) { days = r.days }
+    }
+
+    func showDay(_ d: Date) {
+        let day = Calendar.current.startOfDay(for: min(d, Date()))
+        guard day != historyDay else { return }
+        historyDay = day
+        followToday = Calendar.current.isDateInToday(day)
+        produced = []; consumed = []; dayTotals = DayTotals()
+        Task { await loadHistory() }
+    }
+
+    func shiftDay(_ by: Int) {
+        if let d = Calendar.current.date(byAdding: .day, value: by, to: historyDay) { showDay(d) }
     }
 
     // MARK: - evcc-JSON lesen
@@ -148,12 +198,12 @@ final class EnergyStore {
             }
         }
 
-        let now = Date()
-        updated = now
-        if let last = produced.last, !Calendar.current.isDate(last.time, inSameDayAs: now) { produced = [] }
-        if produced.last.map({ now.timeIntervalSince($0.time) >= 60 }) ?? true {
-            produced.append(Sample(time: now, watts: pv))
-            Self.saveToday(produced)
+        updated = Date()
+        // Wer „heute" anschaut, springt um Mitternacht automatisch auf den neuen Tag
+        if followToday && !showingToday {
+            historyDay = Calendar.current.startOfDay(for: Date())
+            produced = []; consumed = []; dayTotals = DayTotals()
+            Task { await loadHistory() }
         }
     }
 
@@ -161,19 +211,6 @@ final class EnergyStore {
         if let n = v as? NSNumber { return n.doubleValue }
         if let s = v as? String { return Double(s) }
         return nil
-    }
-
-    // MARK: - Tagesverlauf lokal merken
-
-    private static var todayURL: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("pv-today.json")
-    }
-    private static func saveToday(_ s: [Sample]) { try? JSONEncoder().encode(s).write(to: todayURL) }
-    private static func loadToday() -> [Sample] {
-        guard let d = try? Data(contentsOf: todayURL),
-              let s = try? JSONDecoder().decode([Sample].self, from: d),
-              let first = s.first, Calendar.current.isDateInToday(first.time) else { return [] }
-        return s
     }
 
     // MARK: Gebäude mit PV (für das Bild)
