@@ -707,7 +707,21 @@ def daikin_callback(code: str = "", state: str = ""):
 import homeconnect as _hc  # noqa: E402
 
 homeconnect = _hc.HomeConnect()
-smartstart = _smartstart.SmartStart(homeconnect, _best_window)   # Auto-Start über Home Connect
+smartstart = _smartstart.SmartStart(homeconnect, _best_window)
+
+
+def _surplus_w():
+    """Überschuss jetzt in W: Einspeisung + Akku-Laden (evcc)"""
+    s = _evcc_state()
+    s = s.get("result", s)
+    grid = s.get("grid") if isinstance(s.get("grid"), dict) else {}
+    bat = s.get("battery") if isinstance(s.get("battery"), dict) else {}
+    g = grid.get("power", s.get("gridPower")) or 0
+    b = bat.get("power", s.get("batteryPower")) or 0
+    return max(-g, 0) + max(-b, 0)
+
+
+smartstart.surplus_fn = _surplus_w   # Auto-Start über Home Connect
 
 
 homeconnect.on_event = lambda ha, title, body: push.send("washer", f"{_smartstart.label(ha)}: {title}", body) \

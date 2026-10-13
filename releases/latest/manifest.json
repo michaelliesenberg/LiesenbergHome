@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.29.3",
- "file": "hub-2.29.3.tar.gz",
- "sha256": "93a352914c7904db354a832dfbfa48177172648c03dc0b1fbdf9fdaa0cd722e2",
+ "version": "2.30.0",
+ "file": "hub-2.30.0.tar.gz",
+ "sha256": "2610616f3e73d96a0a7fab4b449935717fac69387ff72c0984b56e2ec0f897b1",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Signierte Updates mit automatischem R\u00fcckfall",
- "created": 1791901009
+ "notes": "Auto-Start nach echter Sonne (\u00b12 h)",
+ "created": 1791901604
 }
