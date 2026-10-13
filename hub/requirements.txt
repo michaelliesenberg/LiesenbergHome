@@ -4,3 +4,7 @@ requests>=2.31
 python-multipart>=0.0.9
 segno>=1.6
 pyatv>=0.14
+httpx[http2]>=0.27
+python-roborock==7.12.1
+pymammotion==0.10.9
+packaging>=23

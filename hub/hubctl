@@ -8,6 +8,15 @@ SERVICE=liesenberg-home
 PORT=8080
 REPO=https://github.com/michaelliesenberg/LiesenbergHome
 BRANCH=main
+# Signierte Updates: nur Pakete mit gültiger Ed25519-Signatur dieses Schlüssels werden installiert.
+# Der private Schlüssel liegt nur auf Michaels Mac (tools/hub-release.sh).
+PUBKEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAjwlTSyEpnUsrAM+7tiOCBjk1Hv32Y35Y7ymRl198eCA=
+-----END PUBLIC KEY-----'
+# Woher Pakete kommen (manifest.json, manifest.sig, hub-<ver>.tar.gz). Leer = nur lokal abgelegte Pakete.
+RELEASE_URL="https://raw.githubusercontent.com/michaelliesenberg/LiesenbergHome/main/releases/latest"
+INCOMING="$HUB_DIR/update-incoming"
+BACKUPS=/var/backups/liesenberg-home
 
 case "${1:-}" in
   ts-status)
@@ -52,6 +61,80 @@ case "${1:-}" in
     sudo -u "$owner" "$HUB_DIR/venv/bin/pip" install -q -r "$HUB_DIR/requirements.txt" 2>&1 | tail -2
     echo "Version: $(cat $HUB_DIR/VERSION 2>/dev/null)"
     (sleep 1; systemctl restart "$SERVICE") >/dev/null 2>&1 &
+    ;;
+  release-fetch)
+    # Neuestes Paket von RELEASE_URL nach $INCOMING holen (nur wenn eine Quelle eingetragen ist)
+    [ -n "$RELEASE_URL" ] || { echo "keine Update-Quelle"; exit 0; }
+    mkdir -p "$INCOMING"; tmp=$(mktemp -d)
+    curl -fsSL "$RELEASE_URL/manifest.json" -o "$tmp/manifest.json" && curl -fsSL "$RELEASE_URL/manifest.sig" -o "$tmp/manifest.sig" \
+      || { rm -rf "$tmp"; echo "Download fehlgeschlagen"; exit 1; }
+    file=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['file'])" "$tmp/manifest.json" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    [ -n "$file" ] && curl -fsSL "$RELEASE_URL/$file" -o "$tmp/$file" || { rm -rf "$tmp"; echo "Paket fehlt"; exit 1; }
+    rm -rf "$INCOMING"/*; mv "$tmp"/* "$INCOMING"/; rmdir "$tmp"; chown -R "$(stat -c %U "$HUB_DIR")" "$INCOMING"
+    echo "ok"
+    ;;
+  release-install)
+    # Eigentliche Installation außerhalb des Hub-Dienstes laufen lassen – sonst beendet der Neustart das Skript
+    systemd-run --unit=liesenberg-hub-update --collect --quiet /usr/local/sbin/hubctl release-install-now \
+      && echo "gestartet" || { echo "Start fehlgeschlagen"; exit 1; }
+    ;;
+  release-check|release-install-now)
+    # Signatur + Prüfsumme prüfen; bei release-install: sichern, installieren, Gesundheitscheck, sonst zurückrollen
+    m="$INCOMING/manifest.json"; sig="$INCOMING/manifest.sig"
+    [ -f "$m" ] && [ -f "$sig" ] || { echo '{"available":false,"reason":"kein Paket"}'; exit 0; }
+    pub=$(mktemp); printf '%s\n' "$PUBKEY" > "$pub"; rawsig=$(mktemp); base64 -d < "$sig" > "$rawsig" 2>/dev/null
+    if ! openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$m" -sigfile "$rawsig" >/dev/null 2>&1; then
+      rm -f "$pub" "$rawsig"; echo '{"available":false,"reason":"Signatur ungültig – Paket wird ignoriert"}'; exit 1
+    fi
+    rm -f "$pub" "$rawsig"
+    eval "$(python3 - "$m" <<'PY'
+import json, re, shlex, sys
+d = json.load(open(sys.argv[1]))
+ok = bool(re.fullmatch(r"\d+\.\d+\.\d+", d.get("version", ""))) and bool(re.fullmatch(r"hub-[0-9.]+\.tar\.gz", d.get("file", "")))
+print(f"NEWV={shlex.quote(d['version'] if ok else '')}; FILE={shlex.quote(d['file'] if ok else '')}; SHA={shlex.quote(d.get('sha256', ''))}")
+PY
+)"
+    [ -n "$NEWV" ] && [ -f "$INCOMING/$FILE" ] || { echo '{"available":false,"reason":"Paket unvollständig"}'; exit 1; }
+    [ "$(sha256sum "$INCOMING/$FILE" | awk '{print $1}')" = "$SHA" ] || { echo '{"available":false,"reason":"Prüfsumme falsch"}'; exit 1; }
+    CURV=$(cat "$HUB_DIR/VERSION" 2>/dev/null)
+    newer=$(python3 -c "import sys;t=lambda v:tuple(int(x) for x in v.split('.'));print('true' if t(sys.argv[1])>t(sys.argv[2]) else 'false')" "$NEWV" "${CURV:-0.0.0}")
+    # eine Version, die schon einmal zurückgerollt wurde, nicht erneut anbieten
+    [ "$(cat "$HUB_DIR/update-failed" 2>/dev/null)" = "$NEWV" ] && newer=false
+    if [ "$1" = release-check ]; then
+      echo "{\"available\":$newer,\"version\":\"$NEWV\",\"installed\":\"$CURV\",\"signed\":true}"; exit 0
+    fi
+    status() { printf '{"at":%s,"from":"%s","to":"%s","result":"%s"}\n' "$(date +%s)" "$CURV" "$NEWV" "$1" > "$HUB_DIR/update-status.json"; chown "$(stat -c %U "$HUB_DIR")" "$HUB_DIR/update-status.json"; }
+    [ "$newer" = true ] || { status "nicht neuer"; echo "Version $NEWV ist nicht neuer als $CURV"; exit 1; }
+    status "läuft"
+    # Paketinhalt prüfen: nur erwartete Dateinamen, keine Pfade
+    bad=$(tar tzf "$INCOMING/$FILE" | grep -vE '^[A-Za-z0-9_.-]+$' | grep -vE '^(\./)?$')
+    [ -z "$bad" ] || { echo "Unerwartete Pfade im Paket"; exit 1; }
+    owner=$(stat -c %U "$HUB_DIR"); ts=$(date +%Y%m%d-%H%M%S); mkdir -p "$BACKUPS"
+    bk="$BACKUPS/$CURV-$ts"; mkdir -p "$bk"
+    cp -a "$HUB_DIR"/*.py "$HUB_DIR"/VERSION "$HUB_DIR"/requirements.txt "$bk"/ 2>/dev/null; cp -a /usr/local/sbin/hubctl "$bk/hubctl.installed"
+    tmp=$(mktemp -d); tar xzf "$INCOMING/$FILE" -C "$tmp" --no-same-owner
+    cp "$tmp"/*.py "$tmp"/VERSION "$tmp"/requirements.txt "$HUB_DIR"/
+    for f in install.sh liesenberg-home.service caddy-https.sh hubctl; do [ -f "$tmp/$f" ] && cp "$tmp/$f" "$HUB_DIR/$f"; done
+    chown -R "$owner" "$HUB_DIR"
+    sudo -u "$owner" "$HUB_DIR/venv/bin/pip" install -q -r "$HUB_DIR/requirements.txt" >/tmp/hub-pip.log 2>&1
+    systemctl restart "$SERVICE"
+    healthy=false
+    for _ in $(seq 1 45); do
+      sleep 2
+      v=$(curl -fs "http://127.0.0.1:$PORT/api/health" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+      [ "$v" = "$NEWV" ] && { healthy=true; break; }
+    done
+    if [ "$healthy" = true ]; then
+      [ -f "$tmp/hubctl" ] && install -m 755 -o root -g root "$tmp/hubctl" /usr/local/sbin/hubctl
+      rm -rf "$tmp" "$INCOMING"/*
+      ls -1dt "$BACKUPS"/*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf      # nur die letzten 3 Sicherungen behalten
+      status "ok"; echo "ok $CURV -> $NEWV"
+    else
+      cp "$bk"/*.py "$bk"/VERSION "$bk"/requirements.txt "$HUB_DIR"/; chown -R "$owner" "$HUB_DIR"
+      systemctl restart "$SERVICE"; rm -rf "$tmp" "$INCOMING"/*
+      echo "$NEWV" > "$HUB_DIR/update-failed"; chown "$owner" "$HUB_DIR/update-failed"
+      status "zurückgerollt"; echo "ROLLBACK: $NEWV startete nicht gesund – zurück auf $CURV (Sicherung $bk)"; exit 1
+    fi
     ;;
   backup)
     # Alles, was für eine Neuinstallation nötig ist, als tar.gz auf stdout (enthält Zugangsdaten!)
@@ -110,6 +193,6 @@ case "${1:-}" in
     journalctl -u "$SERVICE" -n 80 --no-pager 2>&1
     ;;
   *)
-    echo "usage: hubctl ts-status|ts-install|ts-login [name]|funnel-on|funnel-off|update|backup|restore|drive-backup|drive-test|restart|logs"; exit 2
+    echo "usage: hubctl ts-status|ts-install|ts-login [name]|funnel-on|funnel-off|update|release-fetch|release-check|release-install|backup|restore|drive-backup|drive-test|restart|logs"; exit 2
     ;;
 esac

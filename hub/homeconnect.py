@@ -82,12 +82,28 @@ TYPE_DE = {"Washer": "Waschmaschine", "Dryer": "Trockner", "WasherDryer": "Wasch
            "Hob": "Kochfeld", "Hood": "Dunstabzug", "WineCooler": "Weinkühlschrank"}
 
 
+# Ereignisse, die eine Mitteilung wert sind (Schlüssel-Ende → Titel, Text)
+EVENT_PUSH = {
+    "PreheatFinished": ("ist vorgeheizt", "Die Temperatur ist erreicht."),
+    "SaltNearlyEmpty": ("Salz fast leer", "Bitte Regeneriersalz nachfüllen."),
+    "RinseAidNearlyEmpty": ("Klarspüler fast leer", "Bitte Klarspüler nachfüllen."),
+    "IDos1FillLevelPoor": ("i-Dos 1 fast leer", "Bitte Waschmittel nachfüllen."),
+    "IDos2FillLevelPoor": ("i-Dos 2 fast leer", "Bitte Weichspüler/Waschmittel nachfüllen."),
+    "ProgramAborted": ("Programm abgebrochen", "Das Programm wurde abgebrochen."),
+    "DoorAlarmFreezer": ("Gefrierfach-Tür offen", "Bitte Tür schließen."),
+    "DoorAlarmRefrigerator": ("Kühlschrank-Tür offen", "Bitte Tür schließen."),
+    "TemperatureAlarmFreezer": ("Gefrierfach zu warm", "Bitte nachsehen."),
+}
+
+
 class HomeConnect:
     def __init__(self):
         self.auth = Auth()
         self.appliances = {}   # haId → dict
         self.error = None
         self.updated = None
+        self.on_event = None   # (gerät, titel, text) → Mitteilung; vom Hub gesetzt
+        self._detail_cache = {}
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
@@ -96,11 +112,114 @@ class HomeConnect:
 
     def _get(self, path):
         r = requests.get(f"{BASE}{path}", headers={"Authorization": f"Bearer {self.auth.access_token()}",
-                                                   "Accept": ACCEPT}, timeout=20)
+                                                   "Accept": ACCEPT, "Accept-Language": "de-DE"}, timeout=20)
         if r.status_code in (404, 409):   # Gerät offline / kein Programm aktiv / nicht unterstützt
             return None
         r.raise_for_status()
         return r.json().get("data")
+
+    def _put(self, path, body):
+        r = requests.put(f"{BASE}{path}", json=body, timeout=20,
+                         headers={"Authorization": f"Bearer {self.auth.access_token()}",
+                                  "Accept": ACCEPT, "Content-Type": ACCEPT})
+        if r.status_code >= 400:
+            try:
+                msg = (r.json().get("error") or {}).get("description") or r.text
+            except ValueError:
+                msg = r.text
+            raise RuntimeError(f"Home Connect: {msg[:200]}")
+
+    def start_selected(self, ha_id):
+        """Das am Gerät gewählte Programm starten (Fernstart muss am Gerät erlaubt sein)."""
+        prog = self._get(f"/api/homeappliances/{ha_id}/programs/selected")
+        if not prog or not prog.get("key"):
+            raise RuntimeError("Am Gerät ist kein Programm gewählt")
+        opts = [{"key": o["key"], "value": o["value"]} for o in prog.get("options", [])
+                if o.get("key") and "value" in o and not o["key"].endswith(("StartInRelative", "FinishInRelative"))]
+        try:
+            self._put(f"/api/homeappliances/{ha_id}/programs/active", {"data": {"key": prog["key"], "options": opts}})
+        except RuntimeError:
+            # manche Optionen sind nur lesbar → nur mit dem Programm (Standard-Optionen) starten
+            self._put(f"/api/homeappliances/{ha_id}/programs/active", {"data": {"key": prog["key"]}})
+        return prog["key"].split(".")[-1]
+
+    def _delete(self, path):
+        r = requests.delete(f"{BASE}{path}", timeout=20,
+                            headers={"Authorization": f"Bearer {self.auth.access_token()}", "Accept": ACCEPT})
+        if r.status_code >= 400:
+            raise RuntimeError(f"Home Connect: {r.text[:200]}")
+
+    # ---------------------------------------------------------- Details (gecacht – Home Connect erlaubt 1000 Abfragen/Tag)
+    @staticmethod
+    def _opt(o):
+        return {"key": o.get("key"), "name": o.get("name") or o.get("key", "").split(".")[-1], "value": o.get("value"),
+                "displayvalue": o.get("displayvalue"), "unit": o.get("unit")}
+
+    def detail(self, ha_id, fresh=False):
+        c = self._detail_cache.get(ha_id)
+        if c and not fresh and time.time() - c[0] < 45:
+            return c[1]
+        ha = dict(self.appliances.get(ha_id) or {})
+        base = f"/api/homeappliances/{ha_id}"
+        status = (self._get(f"{base}/status") or {}).get("status", [])
+        settings = (self._get(f"{base}/settings") or {}).get("settings", [])
+        active = self._get(f"{base}/programs/active")
+        selected = self._get(f"{base}/programs/selected")
+        avail = (self._get(f"{base}/programs/available") or {}).get("programs", [])
+        val = {x["key"]: x.get("value") for x in status + settings if "key" in x}
+        shortv = lambda k: str(val.get(k) or "").split(".")[-1] or None
+        out = {
+            **ha,
+            "door": shortv("BSH.Common.Status.DoorState"),
+            "remoteControl": bool(val.get("BSH.Common.Status.RemoteControlActive")),
+            "remoteStart": bool(val.get("BSH.Common.Status.RemoteControlStartAllowed")),
+            "power": shortv("BSH.Common.Setting.PowerState"),
+            "cavityTemp": val.get("Cooking.Oven.Status.CurrentCavityTemperature"),
+            "active": ({"key": active.get("key"), "name": active.get("name") or active.get("key", "").split(".")[-1],
+                        "options": [self._opt(o) for o in active.get("options", [])]} if active else None),
+            "selected": ({"key": selected.get("key"), "name": selected.get("name") or selected.get("key", "").split(".")[-1],
+                          "options": [self._opt(o) for o in selected.get("options", [])]} if selected else None),
+            "programs": [{"key": p.get("key"), "name": p.get("name") or p.get("key", "").split(".")[-1]}
+                         for p in avail if p.get("key")],
+            "settings": [{"key": x["key"], "name": x.get("name") or x["key"].split(".")[-1], "value": x.get("value"),
+                          "unit": x.get("unit")} for x in settings if "key" in x],
+        }
+        self._detail_cache[ha_id] = (time.time(), out)
+        return out
+
+    def program_options(self, ha_id, key):
+        """Optionen eines Programms mit erlaubten Werten (Temperatur, Dauer, Schleudern …)"""
+        p = self._get(f"/api/homeappliances/{ha_id}/programs/available/{key}") or {}
+        opts = []
+        for o in p.get("options", []):
+            con = o.get("constraints") or {}
+            opts.append({"key": o.get("key"), "name": o.get("name") or o.get("key", "").split(".")[-1], "type": o.get("type"),
+                         "unit": o.get("unit"), "default": con.get("default"), "min": con.get("min"), "max": con.get("max"),
+                         "step": con.get("stepsize"), "allowed": con.get("allowedvalues"), "display": con.get("displayvalues"),
+                         "readOnly": con.get("access") == "read"})
+        return {"key": key, "name": p.get("name") or key.split(".")[-1], "options": opts}
+
+    def start(self, ha_id, key, options=None):
+        """Programm mit Optionen starten – nur wenn Fernstart am Gerät erlaubt ist (prüft Home Connect selbst)."""
+        body = {"data": {"key": key}}
+        if options:
+            body["data"]["options"] = [{"key": k, "value": v} for k, v in options.items() if v is not None]
+        self._put(f"/api/homeappliances/{ha_id}/programs/active", body)
+        self._detail_cache.pop(ha_id, None)
+
+    def stop(self, ha_id):
+        self._delete(f"/api/homeappliances/{ha_id}/programs/active")
+        self._detail_cache.pop(ha_id, None)
+
+    def set_option(self, ha_id, key, value):
+        """Option des laufenden Programms ändern (z. B. Backofen-Temperatur oder Dauer)"""
+        self._put(f"/api/homeappliances/{ha_id}/programs/active/options/{key}", {"data": {"key": key, "value": value}})
+        self._detail_cache.pop(ha_id, None)
+
+    def set_power(self, ha_id, state):
+        self._put(f"/api/homeappliances/{ha_id}/settings/BSH.Common.Setting.PowerState",
+                  {"data": {"key": "BSH.Common.Setting.PowerState", "value": f"BSH.Common.EnumType.PowerState.{state}"}})
+        self._detail_cache.pop(ha_id, None)
 
     def _apply(self, ha, key, value):
         short = key.split(".")[-1]
@@ -171,6 +290,15 @@ class HomeConnect:
                         ha = self.appliances.get(it.get("haId", ha_id), ha)
                         if ha is not None:
                             self._apply(ha, it.get("key", ""), it.get("value"))
+                            self._detail_cache.pop(ha.get("id"), None)
+                            short = it.get("key", "").split(".")[-1]
+                            present = str(it.get("value", "")).endswith(("Present", "Confirmed")) or it.get("value") is True
+                            if ev == "EVENT" and short in EVENT_PUSH and present and self.on_event:
+                                title, body = EVENT_PUSH[short]
+                                try:
+                                    self.on_event(ha, title, body)
+                                except Exception:
+                                    pass
                     self.updated = time.time()
                 elif raw.startswith("data:") and ev in ("CONNECTED", "DISCONNECTED", "PAIRED", "DEPAIRED"):
                     self.refresh_all()

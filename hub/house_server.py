@@ -13,19 +13,22 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"target"|"trigger"}
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
-  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= ·
+  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= · /api/energy/plan · GET/POST/DELETE /api/smartstart (Geräte automatisch starten) ·
   GET/PUT /api/prices (Strompreise) und /api/energy/summary: Besitzer + Vollzugriff, nicht Gäste · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
+import json
 import os
+import re
 import socket
 import ssl
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 
 import requests
 import urllib3
@@ -166,12 +169,44 @@ def home():
         elif kind == "homeassistant" and c["homeassistant"]["url"]:
             import ha
             obj = ha.HABackend(c["homeassistant"]["url"], c["homeassistant"]["token"])
+        elif kind == "shelly":
+            import shelly
+            obj = shelly.ShellyBackend(lambda: hub_config.get("shelly"), lambda: hub_config.get("home_name"))
         elif kind == "demo":
             obj = devices.DemoBackend()
         else:
             obj = None
+        if obj is not None:
+            _wrap_for_consumers(obj)
         _backend.update(key=key, obj=obj)
     return _backend["obj"]
+
+
+def _wrap_for_consumers(obj):
+    """Jeder Schaltbefehl (App, Szene, Siri, Zentral aus) → Verbrauchs-Messung im Hintergrund."""
+    orig = obj.command
+
+    def command(did, cmd):
+        res = orig(did, cmd)
+        try:
+            c = globals().get("consumers")
+            if c is not None:
+                d = devices.device_index(devices.apply_overrides(obj.structure())).get(did)
+                if d:
+                    c.observe(did, d, cmd)
+        except Exception:
+            pass
+        return res
+    obj.command = command
+
+    orig_off = obj.central_off
+
+    def central_off():
+        c = globals().get("consumers")
+        if c is not None:
+            c.note_command()                # Zentral aus: viele Lichter gleichzeitig, nicht zuordnen
+        return orig_off()
+    obj.central_off = central_off
 
 
 def need_home():
@@ -396,6 +431,7 @@ def people_remove(pid: str, p=Depends(owner)):
     if pid == p["id"]:
         raise HTTPException(status_code=400, detail="Du kannst dich nicht selbst entfernen")
     people.remove(pid)
+    push.remove_person(pid)
     return {"ok": True}
 
 
@@ -421,24 +457,9 @@ def energy(p=Depends(person)):
 
 
 # ---------------------------------------------------------------- Hub-Version & Update (die App zeigt „Update verfügbar")
-_latest = {"at": 0.0, "v": None}
+import updater as _updater  # noqa: E402
 
-
-def latest_version():
-    """Neueste Hub-Version auf GitHub (höchstens einmal pro Stunde nachsehen)."""
-    if time.time() - _latest["at"] < 3600:
-        return _latest["v"]
-    _latest["at"] = time.time()
-    try:
-        repo = hub_config.get("update.repo", "")
-        if "github.com/" in repo:
-            raw = repo.replace("github.com", "raw.githubusercontent.com") + f"/{hub_config.get('update.branch', 'main')}/hub/VERSION"
-            r = requests.get(raw, timeout=5)
-            if r.ok and len(r.text.strip()) < 20:
-                _latest["v"] = r.text.strip()
-    except requests.RequestException:
-        pass
-    return _latest["v"]
+updater = None          # wird nach dem Anlegen von push gestartet (unten)
 
 
 def _vtuple(v):
@@ -450,20 +471,24 @@ def _vtuple(v):
 
 @app.get("/api/hub/version")
 def hub_version(p=Depends(person)):
-    latest = latest_version()
-    return {"installed": VERSION, "latest": latest,
-            "updateAvailable": bool(latest) and _vtuple(latest) > _vtuple(VERSION)}
+    """Installierte Version und – falls ein neueres, SIGNIERTES Paket bereitliegt – dessen Version."""
+    u = updater
+    latest = u.available() if u else None
+    return {"installed": VERSION, "latest": latest or VERSION, "updateAvailable": bool(latest),
+            "mode": hub_config.get("update.mode") or "ask", "last": u.last_result() if u else None}
 
 
 @app.post("/api/hub/update")
 def hub_update(p=Depends(can_edit)):   # Besitzer + Vollzugriff, Gäste nicht
-    """Neueste Version von GitHub holen und neu starten (dauert ca. 30–60 s)."""
-    rc, out = setup_web._hubctl("update", timeout=300)
-    if rc != 0:
-        raise HTTPException(status_code=502, detail=f"Update fehlgeschlagen: {out[-300:]}")
-    print(f"[UPDATE] {p['name']} hat den Hub aktualisiert: {out[-80:]}", flush=True)
-    _latest["at"] = 0
-    return {"ok": True, "message": out[-200:]}
+    """Signiertes Paket installieren: Sicherung → Installation → Gesundheitscheck → sonst automatisch zurück."""
+    if updater is None:
+        raise HTTPException(status_code=503, detail="Updater startet noch")
+    try:
+        out = updater.install()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    print(f"[UPDATE] {p['name']} hat das Update gestartet: {out[-80:]}", flush=True)
+    return {"ok": True, "message": "Update läuft – der Hub startet gleich neu."}
 
 
 # ---------------------------------------------------------------- Sicherung (nur Besitzer, z. B. automatisch durch die App)
@@ -538,6 +563,85 @@ def energy_summary(period: str = "day", date: str = "", p=Depends(can_edit)):
     return energy_history.summary(period, d, _prices())
 
 
+import planner as _planner  # noqa: E402
+import report as _report  # noqa: E402
+
+
+@app.get("/api/energy/report")
+def energy_report(month: str = "", p=Depends(can_edit)):
+    """Monatsbericht (JJJJ-MM, leer = aktueller Monat) mit Vormonat und Vorjahresmonat."""
+    if month and not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(status_code=400, detail="Monat bitte als JJJJ-MM")
+    return _report.month_report(energy_history, _prices(), month or None)
+
+
+@app.get("/api/energy/year")
+def energy_year(year: int = 0, p=Depends(can_edit)):
+    """Jahresrückblick (Monate, Summen, Rekorde)."""
+    return _report.year_report(energy_history, _prices(), year or None)
+
+
+@app.get("/api/energy/plan")
+def energy_plan(p=Depends(person)):
+    """Energie-Planer: beste Startzeiten für Geräte und Auto (Sonne, Preis, Grundverbrauch)."""
+    extra = [_planner.VACUUM] if globals().get("vacuum") is not None and vacuum.configured and vacuum.status else []
+    r = _planner.plan(_evcc_state(), energy_history, _prices(), extra=extra)
+    for rec in r.get("recommendations", []):
+        if rec["id"] == "vacuum":
+            # Vorschlag nur – nie automatisch starten. App bietet „Erinnern", „Jetzt starten" (mit Rückfrage)
+            # und „Als Zeitplan übernehmen" (Option „nur wenn niemand zuhause").
+            rec["note"] = "Verbrauch geschätzt ≈ 0,5 kWh (Laden, Mopp waschen, Heißluft-Trocknen)"
+            rec["someoneHome"] = someone_home()
+            rec["devices"] = [{"id": d, "name": st.get("name")} for d, st in vacuum.status.items()]
+    return r
+
+
+def _evcc_state():
+    url = hub_config.get("evcc.url")
+    if not url:
+        raise HTTPException(status_code=409, detail="evcc ist nicht eingerichtet")
+    try:
+        r = requests.get(f"{url.rstrip('/')}/api/state", timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"evcc nicht erreichbar: {e}")
+
+
+def _best_window(profile, deadline=None):
+    recs = _planner.plan(_evcc_state(), energy_history, _prices(), only=profile, deadline=deadline)["recommendations"]
+    if not recs:
+        raise HTTPException(status_code=400, detail="Kein passendes Zeitfenster – „fertig bis“ liegt zu früh")
+    return recs[0]
+
+
+import smartstart as _smartstart  # noqa: E402
+
+
+@app.get("/api/smartstart")
+def smartstart_list(p=Depends(person)):
+    """Wasch-/Spül-/Trockenmaschinen aus Home Connect mit geplantem Auto-Start."""
+    return {"devices": smartstart.devices()}
+
+
+class SmartStartRequest(BaseModel):
+    deadline: float | None = None    # Unix-Zeit „fertig bis" (optional)
+
+
+@app.post("/api/smartstart/{ha_id}")
+def smartstart_schedule(ha_id: str, body: SmartStartRequest, p=Depends(person)):   # alle Personen (z. B. Haushaltshilfe)
+    try:
+        return smartstart.schedule(ha_id, body.deadline, by=p["name"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/smartstart/{ha_id}")
+def smartstart_cancel(ha_id: str, p=Depends(person)):
+    smartstart.cancel(ha_id)
+    return {"ok": True}
+
+
 @app.get("/api/energy/days")
 def energy_days(limit: int = 31, p=Depends(person)):
     """Tageswerte (kWh) der letzten Tage – neuester zuerst."""
@@ -603,12 +707,117 @@ def daikin_callback(code: str = "", state: str = ""):
 import homeconnect as _hc  # noqa: E402
 
 homeconnect = _hc.HomeConnect()
+smartstart = _smartstart.SmartStart(homeconnect, _best_window)   # Auto-Start über Home Connect
+
+
+homeconnect.on_event = lambda ha, title, body: push.send("washer", f"{_smartstart.label(ha)}: {title}", body) \
+    if globals().get("push") is not None and push.configured else None
+
+
+@app.get("/api/hc/{ha_id}")
+def hc_detail(ha_id: str, fresh: bool = False, p=Depends(person)):
+    try:
+        return homeconnect.detail(ha_id, fresh=fresh)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/hc/{ha_id}/program/{key}")
+def hc_program(ha_id: str, key: str, p=Depends(person)):
+    try:
+        return homeconnect.program_options(ha_id, key)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+class HCAction(BaseModel):
+    action: str                     # start | stop | option | power
+    key: str | None = None          # Programm- bzw. Options-Schlüssel
+    value: float | int | str | bool | None = None
+    options: dict | None = None     # beim Start: {Optionsschlüssel: Wert}
+
+
+@app.post("/api/hc/{ha_id}/action")
+def hc_action(ha_id: str, body: HCAction, p=Depends(can_edit)):
+    try:
+        if body.action == "start":
+            homeconnect.start(ha_id, body.key, body.options)
+        elif body.action == "stop":
+            homeconnect.stop(ha_id)
+        elif body.action == "option":
+            homeconnect.set_option(ha_id, body.key, body.value)
+        elif body.action == "power":
+            homeconnect.set_power(ha_id, str(body.value))
+        else:
+            raise HTTPException(status_code=400, detail="Unbekannte Aktion")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    print(f"[HAUSGERÄTE] {p['name']}: {body.action} {body.key or ''} {body.value or ''}", flush=True)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Miele@home (offizielle 3rd-Party-API)
+import miele as _miele  # noqa: E402
+
+miele = _miele.Miele()          # Mitteilungen werden weiter unten angebunden (push entsteht später)
+smartstart.miele = miele        # Miele-Spüler/-Waschmaschinen auch in „Energie sparen"
+_miele.LOCAL_URL_FN = lambda: local_url()
+
+
+@app.get("/miele/callback")
+def miele_callback(code: str = "", state: str = ""):
+    """Ziel der Miele-Anmeldung (Redirect-URI aus dem Miele-Entwicklerportal)."""
+    from fastapi.responses import HTMLResponse
+    if not code or state not in _miele.PENDING:
+        raise HTTPException(status_code=400, detail="Anmeldung bitte über die Einrichtungsseite starten")
+    _miele.PENDING.pop(state, None)
+    try:
+        miele.auth.exchange_code(code)
+        miele._wake.set()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Miele: {e}")
+    return HTMLResponse("<meta name=viewport content='width=device-width'><body style='font-family:-apple-system;"
+                        "background:#0a0b0d;color:#eee;padding:40px'><h2>Miele verbunden ✓</h2>"
+                        "<p>Du kannst dieses Fenster schließen.</p>")
+
+
+class MieleAction(BaseModel):
+    action: str        # start | stop | pause | start_time (Min.) | light | power_on | power_off | target_temp | program | super…
+    value: dict | int | float | bool | str | None = None
+
+
+@app.get("/api/miele/{serial}")
+def miele_detail(serial: str, p=Depends(person)):
+    try:
+        return miele.detail(serial)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Miele: {e}")
+
+
+@app.post("/api/miele/{serial}/action")
+def miele_action(serial: str, body: MieleAction, p=Depends(can_edit)):
+    try:
+        miele.action(serial, body.action, body.value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Miele: {e}")
+    print(f"[MIELE] {p['name']}: {body.action} {serial}", flush=True)
+    return {"ok": True}
 
 
 @app.get("/api/appliances")
 def appliances(p=Depends(person)):
-    return {"configured": homeconnect.configured, "loggedIn": homeconnect.auth.ready,
-            "updated": homeconnect.updated, "error": homeconnect.error, "appliances": homeconnect.list()}
+    # Home Connect (Bosch/Siemens) + Miele in einer Liste – die App zeigt beide gleich an
+    lg_ = globals().get("lg")
+    errors = [e for e in (homeconnect.error, miele.error, lg_.error if lg_ else None) if e]
+    return {"configured": homeconnect.configured or miele.configured or bool(lg_ and lg_.configured),
+            "loggedIn": homeconnect.auth.ready or miele.auth.ready or bool(lg_ and lg_.configured),
+            "updated": max(homeconnect.updated or 0, miele.updated or 0, (lg_.updated if lg_ else 0) or 0),
+            "error": " · ".join(errors) or None,
+            "appliances": (homeconnect.list() if homeconnect.auth.ready else []) + miele.list() + (lg_.list() if lg_ else [])}
 
 
 # ---------------------------------------------------------------- Musik (HomePods / AirPlay)
@@ -708,7 +917,7 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
     if phase not in ("start", "stop"):
         raise HTTPException(status_code=400, detail="phase = start oder stop")
     try:
-        return scenes.run(sid, phase)
+        return scenes.run(sid, phase, allow_gates=PERMS[p["role"]]["restricted"])   # Gäste lösen keine Tore aus
     except KeyError:
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
 
@@ -765,7 +974,700 @@ def luxor_central_off(p=Depends(person)):
 # ---------------------------------------------------------------- Einrichtungsseite
 import setup_web  # noqa: E402
 
-setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect,
+# ---------------------------------------------------------------- Mitteilungen (Apple Push) + Wächter
+import push as _push  # noqa: E402
+import notifier as _notifier  # noqa: E402
+
+push = _push.Push(lambda: hub_config.get("push") or {})
+miele.push = push
+updater = _updater.Updater(lambda: hub_config.get("update.mode"), push, VERSION)
+
+import lgthinq as _lgthinq  # noqa: E402
+
+lg = _lgthinq.LGThinQ(lambda: hub_config.get("lgthinq"), lambda ch: hub_config.update({"lgthinq": ch}), push)
+smartstart.lg = lg              # Auto-Start auch für LG (nur nach Bestätigung in der App)
+
+notifier = _notifier.Notifier(push, homeconnect, smartstart, lambda: hub_config.get("evcc.url"),
+                              lambda period, d: energy_history.summary(period, d, _prices()))
+notifier.report_fn = lambda month: _report.month_report(energy_history, _prices(), month)
+notifier.plan_fn = lambda: _planner.plan(_evcc_state(), energy_history, _prices(),
+                                         extra=[_planner.VACUUM] if globals().get("vacuum") is not None and vacuum.configured and vacuum.status else [])
+
+
+def _all_apps():
+    out = list(homeconnect.list()) if homeconnect.auth.ready else []
+    try:
+        out += miele.list()
+    except Exception:
+        pass
+    out += lg.list()
+    return out
+
+
+notifier.apps_fn = _all_apps
+
+
+class PushRegister(BaseModel):
+    token: str
+    env: str = "production"
+    prefs: dict | None = None
+
+
+@app.post("/api/push/register")
+def push_register(body: PushRegister, p=Depends(person)):
+    """App meldet ihr Geräte-Token an (bei jedem Start) – Mitteilungen gehen an dieses iPhone."""
+    try:
+        d = push.register(p, body.token, body.env, body.prefs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"configured": push.configured, "prefs": d["prefs"]}
+
+
+@app.put("/api/push/prefs")
+def push_prefs(body: PushRegister, p=Depends(person)):
+    try:
+        d = push.set_prefs(p, body.token, body.prefs or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"configured": push.configured, "prefs": d["prefs"]}
+
+
+@app.get("/api/push")
+def push_status(p=Depends(person)):
+    return {"configured": push.configured, "error": push.last_error}
+
+
+# ---------------------------------------------------------------- Wetterstation (KNX über das LUXOR IP1)
+# Das IP1 legt die Wetterstation auf feste REST-Datenpunkte 1–12 (geprüft am IP1 mit „Wetterstation 1“).
+_WEATHER_DP = {"wind": 1, "windAlarm1": 2, "windAlarm2": 3, "temperature": 4, "frost": 5, "rain": 6,
+               "lux1": 7, "lux2": 8, "lux3": 9, "lux4": 10, "dusk1": 11, "dusk2": 12}
+_weather = {"at": 0.0, "data": None}
+
+
+@app.get("/api/weather")
+def weather(p=Depends(person)):
+    """Außentemperatur, Wind, Regen, Helligkeit der KNX-Wetterstation (30 s zwischengespeichert)."""
+    if hub_config.get("backend") != "luxor":
+        return {"available": False}
+    if time.time() - _weather["at"] > 30 or _weather["data"] is None:
+        vals = {}
+        for k, dp in _WEATHER_DP.items():
+            try:
+                vals[k] = luxor.get(dp)
+            except Exception:
+                vals[k] = None
+        if vals.get("temperature") is None and vals.get("wind") is None:
+            return {"available": False}
+        wind_kn = float(vals["wind"]) if isinstance(vals.get("wind"), (int, float)) else None
+        lux = [v for v in (vals.get("lux1"), vals.get("lux2"), vals.get("lux3"), vals.get("lux4")) if isinstance(v, (int, float))]
+        _weather["data"] = {
+            "available": True,
+            "temperature": vals.get("temperature"),
+            # Die Wetterstation liefert Knoten (KNX-App zeigt „kn“, Abgleich mit Open-Meteo bestätigt das).
+            # "wind" bleibt für ältere Apps in m/s, dazu Knoten und km/h direkt.
+            "wind": round(wind_kn * 0.514444, 2) if wind_kn is not None else None,
+            "windKnots": round(wind_kn, 1) if wind_kn is not None else None,
+            "windKmh": round(wind_kn * 1.852, 1) if wind_kn is not None else None,
+            "windAlarm": bool(vals.get("windAlarm1") or vals.get("windAlarm2")),
+            "rain": bool(vals.get("rain")),
+            "frost": bool(vals.get("frost")),
+            "lux": max(lux) if lux else None,               # hellste Seite
+            "luxSides": lux,
+            "dusk": bool(vals.get("dusk1") or vals.get("dusk2")),
+        }
+        _weather["at"] = time.time()
+    return _weather["data"]
+
+
+# ---------------------------------------------------------------- Wetter-Vorhersage, Regen-Nowcast, DWD-Warnungen
+import forecast as _forecast  # noqa: E402
+
+forecast = _forecast.Forecast(lambda: hub_config.get("location"), push)
+
+
+@app.get("/api/weather/forecast")
+def weather_forecast(p=Depends(person)):
+    """Vorhersage (48 h stündlich, 7 Tage, Regen je 15 min), Gewitter-Risiko und aktive DWD-Warnungen."""
+    return forecast.forecast()
+
+
+@app.get("/api/weather/precip")
+def weather_precip(p=Depends(person)):
+    """Niederschlags-Raster (ICON, stündlich 48 h) – Verlängerung des Regenradars."""
+    try:
+        return forecast.precip_grid()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Regenvorhersage: {e}")
+
+
+import geo_ref as _geo_ref  # noqa: E402
+
+
+def _weather_grids_warm():
+    """Wind-, Regen-Raster und Kartenlinien im Hintergrund aktuell halten – die App muss nie 20 s warten."""
+    time.sleep(45)
+    while True:
+        for fn in (forecast.wind_grid, forecast.precip_grid):
+            try:
+                fn()
+            except Exception as e:
+                print(f"[WETTER] Raster: {e}", flush=True)
+        try:
+            loc = hub_config.get("location") or {}
+            if loc.get("lat") is not None:
+                _geo_ref.lines(float(loc["lat"]), float(loc["lon"]))
+        except Exception as e:
+            print(f"[WETTER] Karte: {e}", flush=True)
+        time.sleep(3 * 3600 + 60)
+
+
+threading.Thread(target=_weather_grids_warm, daemon=True).start()
+
+
+@app.get("/api/weather/geo")
+def weather_geo(p=Depends(person)):
+    """Flüsse, Seen und Grenzen um das Haus (Natural Earth) für Radar- und Windkarte."""
+    loc = hub_config.get("location") or {}
+    lat, lon = loc.get("lat"), loc.get("lon")
+    if lat is None:
+        raise HTTPException(status_code=400, detail="Standort fehlt")
+    return _geo_ref.lines(float(lat), float(lon))
+
+
+@app.get("/api/weather/wind")
+def weather_wind(p=Depends(person)):
+    """Windkarte: Raster um das Haus (Knoten), 48 h stündlich."""
+    try:
+        return forecast.wind_grid()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Windkarte: {e}")
+
+
+@app.get("/api/weather/alerts")
+def weather_alerts(p=Depends(person)):
+    return {"alerts": forecast.alerts()}
+
+
+# ---------------------------------------------------------------- Verbraucher (gelernt aus Schaltvorgängen)
+import consumers as _consumers  # noqa: E402
+
+consumers = _consumers.Consumers(lambda: hub_config.get("evcc.url"), energy_history)
+
+
+def _all_lights():
+    h = home()
+    if h is None:
+        return {}
+    return {did: d for did, d in devices.device_index(structure()).items() if d.get("kind") in ("light", "dimmer")}
+
+
+def _light_states(ids):
+    h = home()
+    return h.states(ids) if h is not None else {}
+
+
+consumers.watch(_all_lights, _light_states)     # Schalten am Wandtaster (LUXOR/IP1/KNX) mitlernen
+
+
+@app.get("/api/consumers")
+def consumers_report(p=Depends(person)):
+    """Grundlast, gelernter Verbrauch je Licht und was davon gerade an ist."""
+    ids = list(consumers.data.keys())
+    states, home_now = {}, None
+    try:
+        if ids:
+            states = need_home().states(ids)
+    except Exception:
+        pass
+    if consumers.buf:
+        home_now = consumers.buf[-1][1]
+    rep = consumers.report(states, home_now)
+    _add_appliance_consumers(rep)
+    return rep
+
+
+def _add_appliance_consumers(rep):
+    """Miele-Geräte mit Verbrauchsmessung (ecoFeedback): laufendes Programm = kWh bisher, mittlere Leistung."""
+    try:
+        apps = miele.list()
+    except Exception:
+        return
+    for a in apps:
+        kwh = a.get("energyKWh")
+        if not isinstance(kwh, (int, float)) or a.get("type") is None:
+            continue
+        running = a.get("state") == "Run"
+        el = a.get("elapsed") or 0
+        avg = kwh * 1000 / (el / 3600) if running and el >= 300 and kwh > 0 else 0
+        now = round(avg) if running else 0
+        rep["devices"].append({"id": a["id"], "name": _smartstart.label(a), "kind": "appliance", "brand": "Miele",
+                               "watts": round(avg), "samples": 0, "on": running, "nowWatts": now,
+                               "programKWh": round(kwh, 2), "waterL": a.get("waterL")})
+        rep["knownNow"] = round((rep.get("knownNow") or 0) + now)
+        if rep.get("rest") is not None:
+            rep["rest"] = round(rep["rest"] - now)
+    rep["devices"].sort(key=lambda x: -(x.get("watts") or 0))
+
+
+# ---------------------------------------------------------------- Auto laden (evcc-Ladepunkte steuern)
+class CarMode(BaseModel):
+    mode: str                         # off | now | minpv | pv
+
+
+class CarPlan(BaseModel):
+    soc: int                          # Ziel in %
+    time: float                       # Unix-Zeit „fertig bis"
+
+
+class CarLimit(BaseModel):
+    soc: int                          # Ladegrenze in % (evcc „limitSoc“, nur zur Laufzeit – keine Konfiguration)
+
+
+def _evcc_post(path, method="POST"):
+    url = (hub_config.get("evcc.url") or "").rstrip("/")
+    if not url:
+        raise HTTPException(status_code=409, detail="evcc ist nicht eingerichtet")
+    try:
+        r = requests.request(method, url + path, timeout=8)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"evcc nicht erreichbar: {e}")
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"evcc: {r.text[:160]}")
+    return {"ok": True}
+
+
+@app.post("/api/car/{lp}/mode")
+def car_mode(lp: int, body: CarMode, p=Depends(can_edit)):
+    if body.mode not in ("off", "now", "minpv", "pv"):
+        raise HTTPException(status_code=400, detail="Modus: off, now, minpv oder pv")
+    return _evcc_post(f"/api/loadpoints/{lp + 1}/mode/{body.mode}")
+
+
+@app.post("/api/car/{lp}/plan")
+def car_plan(lp: int, body: CarPlan, p=Depends(can_edit)):
+    """Ladeplan „bis Uhrzeit X %“ – evcc lädt dafür in den günstigsten/sonnigsten Stunden."""
+    if not 10 <= body.soc <= 100:
+        raise HTTPException(status_code=400, detail="Ziel zwischen 10 und 100 %")
+    st = _evcc_state()
+    st = st.get("result", st)
+    lps = st.get("loadpoints") or []
+    if lp >= len(lps):
+        raise HTTPException(status_code=404, detail="Ladepunkt nicht gefunden")
+    ts = datetime.fromtimestamp(body.time, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    vehicle = lps[lp].get("vehicleName")
+    if vehicle:
+        return _evcc_post(f"/api/vehicles/{vehicle}/plan/soc/{body.soc}/{ts}")
+    raise HTTPException(status_code=400, detail="Kein Fahrzeug am Ladepunkt erkannt – Fahrzeug in evcc anlegen")
+
+
+def _loadpoint(lp):
+    st = _evcc_state()
+    lps = st.get("result", st).get("loadpoints") or []
+    if lp >= len(lps):
+        raise HTTPException(status_code=404, detail="Ladepunkt nicht gefunden")
+    return lps[lp]
+
+
+@app.delete("/api/car/{lp}/plan")
+def car_plan_delete(lp: int, p=Depends(can_edit)):
+    """Ladeplan löschen (evcc-Laufzeit-API)"""
+    vehicle = _loadpoint(lp).get("vehicleName")
+    if not vehicle:
+        raise HTTPException(status_code=400, detail="Kein Fahrzeug am Ladepunkt erkannt")
+    return _evcc_post(f"/api/vehicles/{vehicle}/plan/soc", method="DELETE")
+
+
+@app.post("/api/car/{lp}/limit")
+def car_limit(lp: int, body: CarLimit, p=Depends(can_edit)):
+    """Ladegrenze („bis X % laden“) – evcc-Laufzeit-API, ändert keine evcc-Konfiguration."""
+    if not 20 <= body.soc <= 100:
+        raise HTTPException(status_code=400, detail="Grenze zwischen 20 und 100 %")
+    _loadpoint(lp)
+    return _evcc_post(f"/api/loadpoints/{lp + 1}/limitsoc/{body.soc}")
+
+
+# ---------------------------------------------------------------- Roborock-Saugroboter + Anwesenheit
+import roborock_vac as _roborock  # noqa: E402
+
+vacuum = _roborock.Vacuum(push)
+
+
+@app.get("/api/vacuum")
+def vacuum_list(p=Depends(person)):
+    return vacuum.list()
+
+
+class VacuumCommand(BaseModel):
+    action: str                     # start | pause | stop | dock | find | rooms | fan | water | wash | empty | dry
+    value: dict | str | bool | None = None
+
+
+@app.post("/api/vacuum/{duid}")
+def vacuum_command(duid: str, body: VacuumCommand, p=Depends(person)):
+    try:
+        vacuum.command(duid, body.action, body.value)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Saugroboter unbekannt")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Saugroboter: {e}")
+    print(f"[ROBOROCK] {p['name']}: {body.action} {body.value or ''}", flush=True)
+    return {"ok": True}
+
+
+class AutoAway(BaseModel):
+    on: bool
+
+
+# ---------------------------------------------------------------- Wärmepumpe (Luxtronik, nur lesen)
+import heatpump as _heatpump  # noqa: E402
+
+heatpump = _heatpump.HeatPump(lambda: hub_config.get("heatpump.host") or "",
+                               house_power_fn=lambda: list(consumers.buf))
+
+
+import sunbuffer as _sunbuffer  # noqa: E402
+
+
+def _evcc_state_safe():
+    try:
+        return _evcc_state()
+    except HTTPException:
+        return {}
+
+
+sunbuffer = _sunbuffer.SunBuffer(heatpump, _evcc_state_safe, forecast,
+                                 lambda d, rising: _scenes._sun_time(d, rising=rising), _prices)
+
+
+@app.get("/api/heatpump/sunbuffer")
+def heatpump_sunbuffer(p=Depends(person)):
+    """Sonnenpuffer-Simulation: nur Auswertung, es wird nichts an der Wärmepumpe geschaltet."""
+    return sunbuffer.report()
+
+
+@app.get("/api/heatpump")
+def heatpump_state(p=Depends(person)):
+    return heatpump.state()
+
+
+@app.get("/api/heatpump/settings")
+def heatpump_settings(p=Depends(person)):
+    try:
+        return heatpump.settings()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Wärmepumpe: {e}")
+
+
+class HeatPumpWrite(BaseModel):
+    what: str                      # hotWaterTarget | heatingMode | hotWaterMode
+    value: float
+
+
+@app.put("/api/heatpump/settings")
+def heatpump_write(body: HeatPumpWrite, p=Depends(can_edit)):
+    """Nur Besitzer/Vollzugriff; die App fragt vorher nach."""
+    try:
+        return heatpump.write(body.what, body.value, by=p["name"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Wärmepumpe: {e}")
+
+
+@app.get("/api/heatpump/history")
+def heatpump_history(hours: int = 24, p=Depends(person)):
+    return {"samples": heatpump.hist(max(1, min(hours, 168)))}
+
+
+# ---------------------------------------------------------------- Live Activities (Sperrbildschirm / Dynamic Island)
+import liveactivity as _liveactivity  # noqa: E402
+
+@app.get("/api/lg/{did}")
+def lg_detail(did: str, p=Depends(person)):
+    try:
+        return lg.detail(did)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="LG-Gerät unbekannt")
+
+
+class _MieleAndLG:
+    """Live-Aktivitäten: Miele- und LG-Geräte zusammen (gleiches Format)"""
+    def list(self):
+        return miele.list() + lg.list()
+
+
+liveactivities = _liveactivity.LiveActivities(
+    push, lambda: _liveactivity.collect(homeconnect, _MieleAndLG(), vacuum, _evcc_state))
+
+
+@app.post("/api/liveactivity/register")
+def liveactivity_register(body: dict, p=Depends(person)):
+    """App meldet Push-to-Start- bzw. Aktualisierungs-Token ihrer Live Activities."""
+    return liveactivities.register(body)
+
+
+@app.get("/api/vacuum/{duid}/map")
+def vacuum_map(duid: str, fresh: bool = False, p=Depends(person)):
+    """Karte des Saugroboters: PNG (base64), Räume mit Farbe/Rechteck, Roboter- und Stationsposition."""
+    try:
+        return vacuum.map(duid, fresh=fresh)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Saugroboter unbekannt")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Karte: {e}")
+
+
+class VacuumZones(BaseModel):
+    zones: list[list[float]]           # je Zone x0, y0, x1, y1 im Kartenbild (0…1)
+    repeat: int = 1
+    dryRun: bool = False               # nur umrechnen und anzeigen, nichts senden
+
+
+@app.post("/api/vacuum/{duid}/zones")
+def vacuum_zones(duid: str, body: VacuumZones, p=Depends(person)):
+    """Zonen-Reinigung: Rechtecke aus der App in Roboter-Koordinaten umrechnen und starten (App fragt vorher)."""
+    try:
+        payload = vacuum.zone_payload(duid, body.zones, body.repeat)
+        if body.dryRun:
+            return {"ok": True, "dryRun": True, "zones": payload}
+        vacuum.command(duid, "zone", {"zones": payload})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Saugroboter unbekannt")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Saugroboter: {e}")
+    print(f"[ROBOROCK] {p['name']}: Zonen {payload}", flush=True)
+    return {"ok": True, "zones": payload}
+
+
+@app.put("/api/vacuum/auto-away")
+def vacuum_auto_away(body: AutoAway, p=Depends(can_edit)):
+    vacuum.set_auto_away(body.on)
+    return {"ok": True, "autoAway": body.on}
+
+
+# ---------------------------------------------------------------- Mammotion-Mähroboter
+import mower as _mower  # noqa: E402
+
+mower = _mower.Mower(push, rain_soon_fn=forecast.rain_soon, storm_fn=forecast.storm_soon)
+
+
+@app.get("/api/mower")
+def mower_list(p=Depends(person)):
+    return mower.list()
+
+
+class MowerCommand(BaseModel):
+    action: str                     # start (value = Aufgaben-ID) | pause | resume | dock | cancel | blade (value = mm)
+    value: str | int | None = None
+
+
+@app.get("/api/mower/{name}/map")
+def mower_map(name: str, p=Depends(person)):
+    try:
+        return mower.map(name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Mähroboter unbekannt")
+
+
+class MapOffset(BaseModel):
+    north: float = 0.0              # Meter, + = nach Norden
+    east: float = 0.0               # Meter, + = nach Osten
+    rotate: float = 0.0             # Grad, + = im Uhrzeigersinn um die Kartenmitte
+
+
+@app.put("/api/mower/{name}/offset")
+def mower_offset(name: str, body: MapOffset, p=Depends(can_edit)):
+    try:
+        return mower.set_offset(name, body.north, body.east, body.rotate)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Mähroboter unbekannt")
+
+
+@app.post("/api/mower/{name}")
+def mower_command(name: str, body: MowerCommand, p=Depends(can_edit)):
+    try:
+        mower.command(name, body.action, body.value)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Mähroboter unbekannt")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Mähroboter: {e}")
+    print(f"[MAMMOTION] {p['name']}: {body.action} {body.value or ''}", flush=True)
+    return {"ok": True}
+
+
+class RainGuard(BaseModel):
+    on: bool
+
+
+@app.put("/api/mower/rain-guard")
+def mower_rain_guard(body: RainGuard, p=Depends(can_edit)):
+    mower.set_rain_guard(body.on)
+    return {"ok": True, "rainGuard": body.on}
+
+
+_PRESENCE_FILE = os.path.join(hub_config.DATA_DIR, "presence.json")
+try:                                 # person_id → (zuhause?, Zeitpunkt) – meldet die App bei Ankommen/Wegfahren
+    with open(_PRESENCE_FILE) as _f:
+        _presence = {k: tuple(v) for k, v in json.load(_f).items()}
+except (OSError, ValueError):
+    _presence = {}
+
+
+def someone_home():
+    """True = jemand zuhause, False = alle weg, None = unbekannt (noch keine Meldungen der App)"""
+    recent = [h for h, t in _presence.values() if time.time() - t < 7 * 86400]
+    return any(recent) if recent else None
+
+
+class Presence(BaseModel):
+    home: bool
+
+
+@app.post("/api/presence")
+def presence(body: Presence, p=Depends(person)):
+    _presence[p["id"]] = (body.home, time.time())
+    try:
+        with open(_PRESENCE_FILE + ".tmp", "w") as f:
+            json.dump(_presence, f)
+        os.replace(_PRESENCE_FILE + ".tmp", _PRESENCE_FILE)
+    except OSError:
+        pass
+    all_away = someone_home() is False
+    vacuum.on_presence(all_away)
+    return {"ok": True, "allAway": all_away}
+
+
+# ---------------------------------------------------------------- Saugroboter-Zeitpläne
+import vacuum_schedule as _vacuum_schedule  # noqa: E402
+
+vacuum_schedules = _vacuum_schedule.VacuumSchedules(vacuum, push, someone_home)
+
+
+@app.get("/api/vacuum/schedules")
+def vacuum_schedules_list(p=Depends(person)):
+    try:
+        app = vacuum.app_timers()
+    except Exception:
+        app = []
+    return {"schedules": vacuum_schedules.list(), "presenceKnown": someone_home() is not None, "appTimers": app}
+
+
+@app.post("/api/vacuum/schedules")
+def vacuum_schedules_save(body: dict, p=Depends(can_edit)):
+    try:
+        return vacuum_schedules.upsert(body, by=p["name"])
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/vacuum/schedules/{sid}")
+def vacuum_schedules_delete(sid: str, p=Depends(can_edit)):
+    vacuum_schedules.delete(sid)
+    return {"ok": True}
+
+
+@app.post("/api/vacuum/schedules/{sid}/skip")
+def vacuum_schedules_skip(sid: str, p=Depends(person)):
+    try:
+        return vacuum_schedules.skip_next(sid, by=p["name"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Zeitplan unbekannt")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------- Urlaubsmodus (Lichtsimulation)
+import vacation as _vacation  # noqa: E402
+
+vacation = _vacation.Vacation(home, lambda d: _scenes._sun_time(d, rising=False), push)
+
+
+@app.get("/api/vacation")
+def vacation_get(p=Depends(person)):
+    return vacation.status()
+
+
+@app.put("/api/vacation")
+async def vacation_put(request: Request, p=Depends(can_edit)):
+    try:
+        return vacation.set(await request.json(), by=p.get("name", ""))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------- Wartung (Erinnerungen)
+import maintenance as _maintenance  # noqa: E402
+
+maintenance = _maintenance.Maintenance(push, vacuum_fn=lambda: vacuum.status if vacuum.configured else {})
+
+
+@app.get("/api/maintenance")
+def maintenance_list(p=Depends(person)):
+    return maintenance.list()
+
+
+@app.post("/api/maintenance")
+async def maintenance_add(request: Request, p=Depends(can_edit)):
+    b = await request.json()
+    try:
+        return maintenance.add(b.get("title"), b.get("days") or 0, b.get("icon"), b.get("last"))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/maintenance/{iid}")
+async def maintenance_update(iid: str, request: Request, p=Depends(can_edit)):
+    try:
+        return maintenance.update(iid, await request.json())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Aufgabe unbekannt")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/maintenance/{iid}/done")
+def maintenance_done(iid: str, p=Depends(person)):
+    try:
+        return maintenance.done(iid)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Aufgabe unbekannt")
+
+
+@app.delete("/api/maintenance/{iid}")
+def maintenance_delete(iid: str, p=Depends(can_edit)):
+    try:
+        maintenance.delete(iid)
+        return {"ok": True}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Aufgabe unbekannt")
+
+
+# ---------------------------------------------------------------- Pico-Firmware (OTA)
+PICO_DIR = os.path.join(hub_config.DATA_DIR, "pico")    # z. B. pico/24v/manifest.json + Dateien
+
+
+@app.get("/pico/{path:path}")
+def pico_file(path: str, request: Request):
+    """Firmware-Dateien für die Picos – nur im Heimnetz (über den Funnel kommt 127.0.0.1 → 404)."""
+    from fastapi.responses import FileResponse
+    host = request.client.host if request.client else ""
+    if not (host.startswith("192.168.") or host.startswith("10.")):
+        raise HTTPException(status_code=404)
+    root = os.path.realpath(PICO_DIR)
+    full = os.path.realpath(os.path.join(root, path))
+    if not full.startswith(root + os.sep) or not os.path.isfile(full):
+        raise HTTPException(status_code=404)
+    return FileResponse(full, media_type="application/json" if full.endswith(".json") else "text/plain")
+
+
+setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
+                           "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 

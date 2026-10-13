@@ -19,6 +19,10 @@ DEFAULTS = {
     "backend": "",                        # "luxor" | "homeassistant" | ""
     "luxor": {"host": "", "user": "admin", "password": ""},
     "homeassistant": {"url": "", "token": ""},
+    "shelly": {"devices": []},            # siehe shelly.py
+    "heatpump": {"host": ""},             # Luxtronik-Wärmepumpe (z. B. 192.168.178.87), leer = keine
+    "lgthinq": {"pat": "", "country": "DE", "client_id": ""},   # LG ThinQ Connect (Personal Access Token)
+    "lang": "de",                         # Sprache der Einrichtungsseite und der Mitteilungen: "de" | "pt-BR"
     "evcc": {"url": "", "sites": {}},
     "prices": {"import": None, "export": None, "base_month": None},   # €/kWh Bezug, €/kWh Einspeisung, €/Monat Grundgebühr   # sites: evcc-PV-Titel → "house" | "other" (Nebengebäude)
     "daikin": {"client_id": "", "client_secret": ""},
@@ -27,7 +31,8 @@ DEFAULTS = {
     "location": {"lat": 51.16, "lon": 10.45},   # Mitte Deutschlands, bis der Besitzer seinen Ort einträgt
     "local_url": "",                      # z. B. http://192.168.1.20:8080 (leer = automatisch)
     "setup_password_hash": "",
-    "update": {"repo": "https://github.com/michaelliesenberg/LiesenbergHome", "branch": "main"},
+    "update": {"repo": "https://github.com/michaelliesenberg/LiesenbergHome", "branch": "main",
+               "mode": "ask"},          # Hub-Updates: "ask" (nur mit Rückfrage) | "auto" (nachts selbst, signiert + Rollback)
 }
 
 _lock = threading.RLock()

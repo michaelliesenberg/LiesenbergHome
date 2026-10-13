@@ -140,9 +140,11 @@ class Scenes:
             return {"position": a["position"]}
         if kind == "heating" and a.get("target") is not None:
             return {"target": a["target"]}
-        return None                                          # Tore werden von Szenen nie ausgelöst
+        if kind == "gate" and a.get("on", True):
+            return {"trigger": True}                         # Tor/Tür: Impuls (nur beim Start, nie beim Ausschalten)
+        return None
 
-    def run(self, sid, phase="start"):
+    def run(self, sid, phase="start", allow_gates=True):
         s = next((x for x in self.scenes if x["id"] == sid), None)
         if not s:
             raise KeyError(sid)
@@ -163,6 +165,9 @@ class Scenes:
                 continue
             cmd = self._cmd(d["kind"], a, phase)
             if not cmd:
+                continue
+            if d["kind"] == "gate" and not allow_gates:
+                errors.append(f"{d['name']}: als Gast nicht erlaubt")
                 continue
             try:
                 home.command(did, cmd)

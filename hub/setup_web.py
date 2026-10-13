@@ -4,6 +4,7 @@ Nur aus dem Heimnetz erreichbar (direkte Verbindung – nicht über Tailscale/Ca
 Hub-Passwort geschützt. Beim allerersten Aufruf legt man Namen und Passwort fest und
 verbindet das eigene iPhone per QR-Code als Besitzer.
 """
+import asyncio
 import html
 import io
 import ipaddress
@@ -38,6 +39,8 @@ def _direct_lan(request: Request) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
+    if ip.is_loopback and os.environ.get("HUB_TEST_LOOPBACK_SETUP") == "1":   # nur Test-Instanz auf dem Rechner
+        return True
     return (ip.is_private or ip.is_link_local) and not ip.is_loopback
 
 
@@ -122,9 +125,10 @@ def _page(title, body, tab=None, csrf=""):
     nav = ""
     if tab:
         nav = "<nav>" + "".join(f'<a class="{"on" if t == tab else ""}" href="/setup/{t}">{n}</a>' for t, n in TABS) + "</nav>"
-    return HTMLResponse(f"""<!doctype html><html lang=de><meta charset=utf-8>
+    import i18n
+    return HTMLResponse(i18n.tr_html(f"""<!doctype html><html lang=de><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>{E(title)} · Hub</title><style>{CSS}</style>
-<main><div class=muted>{E(hub_config.get('home_name') or '')} · Hub {E(CTX.get('version', ''))}</div><h1>{E(title)}</h1>{nav}{body}</main></html>""")
+<main><div class=muted>{E(hub_config.get('home_name') or '')} · Hub {E(CTX.get('version', ''))}</div><h1>{E(title)}</h1>{nav}{body}</main></html>"""))
 
 
 def _form(action, inner, csrf, button="Speichern", enctype=""):
@@ -135,6 +139,12 @@ def _form(action, inner, csrf, button="Speichern", enctype=""):
 def _field(name, label, value="", kind="text", placeholder="", help_=""):
     h = f'<div class="muted" style="font-size:12px;margin-top:4px">{help_}</div>' if help_ else ""
     return f'<label>{E(label)}</label><input name="{name}" type="{kind}" value="{E(str(value or ""))}" placeholder="{E(placeholder)}">{h}'
+
+
+def _lang_select():
+    cur = hub_config.get("lang") or "de"
+    opts = "".join(f'<option value="{v}" {"selected" if cur == v else ""}>{n}</option>' for v, n in (("de", "Deutsch"), ("pt-BR", "Português (Brasil)")))
+    return f'<label>Sprache / Idioma</label><select name=lang>{opts}</select>'
 
 
 def _flash(tok):
@@ -190,6 +200,7 @@ def attach(app, ctx):
             return RedirectResponse("/setup/login", status_code=303)
         body = f"""<div class=card><p>Willkommen! In drei Minuten ist dein Hub eingerichtet.</p>
         <form method=post action="/setup/welcome">
+        {_lang_select()}
         {_field('home_name', 'Name deines Zuhauses', 'Mein Zuhause', placeholder='z. B. Haus am See')}
         {_field('pw', 'Hub-Passwort (für diese Einrichtungsseite)', '', 'password', help_='Mindestens 8 Zeichen. Die App braucht es nicht.')}
         {_field('pw2', 'Passwort wiederholen', '', 'password')}
@@ -219,7 +230,8 @@ def attach(app, ctx):
         if len(pw) < 8 or pw != pw2:
             return _page("Hub einrichten", '<div class="flash err">Passwort zu kurz oder nicht gleich.</div>'
                          '<a class=btn href="/setup/welcome">Zurück</a>')
-        hub_config.update({"home_name": (f.get("home_name") or "Mein Zuhause").strip()[:60]})
+        hub_config.update({"home_name": (f.get("home_name") or "Mein Zuhause").strip()[:60],
+                           "lang": "pt-BR" if f.get("lang") == "pt-BR" else "de"})
         people.set_setup_password(pw)
         tok, r = new_session()
         if not people.has_owner():
@@ -279,7 +291,8 @@ def attach(app, ctx):
                                     for a, b, t in rows) + "</table>"
         home_form = _form("/setup/save/home",
                           f'<div class=row><div>{_field("home_name", "Name des Zuhauses", c["home_name"])}</div>'
-                          f'<div>{_field("place", "Ort / PLZ (für Sonnenauf- und -untergang)", "", placeholder="z. B. 82335 Berg", help_=f"Aktuell: {c["location"]["lat"]:.2f}, {c["location"]["lon"]:.2f}")}</div></div>',
+                          f'<div>{_field("place", "Ort / PLZ (für Sonnenauf- und -untergang)", "", placeholder="z. B. 82335 Berg", help_=f"Aktuell: {c["location"]["lat"]:.2f}, {c["location"]["lon"]:.2f}")}</div></div>'
+                          + _lang_select(),
                           csrf)
         return _page("Übersicht", _flash(tok) + f'<div class=card>{table}</div><div class=card><h2>Zuhause</h2>{home_form}</div>'
                      f'<p class=muted>App-Adresse im Heimnetz: <code>{E(CTX["local_url"]())}</code> · <a href="/setup/logout" class=muted>Abmelden</a></p>',
@@ -289,6 +302,8 @@ def attach(app, ctx):
     async def save_home(request: Request):
         f = await request.form()
         changes = {"home_name": (f.get("home_name") or "Mein Zuhause").strip()[:60]}
+        if f.get("lang") in ("de", "pt-BR"):
+            changes["lang"] = f.get("lang")
         place = (f.get("place") or "").strip()
         msg = "Gespeichert."
         if place:
@@ -314,7 +329,7 @@ def attach(app, ctx):
         def radio(v, label):
             return f'<label style="display:flex;gap:8px;align-items:center;color:var(--text)"><input style="width:auto" type=radio name=backend value="{v}" {"checked" if b == v else ""}>{label}</label>'
         choose = _form("/setup/save/backend", radio("luxor", "LUXORliving (Theben IP1)") + radio("homeassistant", "Home Assistant")
-                       + radio("demo", "Demo-Haus (zum Ausprobieren)"), csrf, "Übernehmen")
+                       + radio("shelly", "Shelly (WLAN, ohne Cloud)") + radio("demo", "Demo-Haus (zum Ausprobieren)"), csrf, "Übernehmen")
         lux = _form("/setup/save/luxor",
                     '<div class=row><div>' + _field("host", "Adresse des IP1", c["luxor"]["host"], placeholder="z. B. 192.168.1.50") + '</div><div>'
                     + _field("user", "Benutzer", c["luxor"]["user"]) + '</div></div>'
@@ -341,6 +356,7 @@ def attach(app, ctx):
         body = (_flash(tok) + f'<div class=card><h2>Woher kommen Räume und Geräte?</h2>{choose}</div>'
                 + (f'<div class=card><h2>LUXORliving</h2>{lux}</div>' if b == "luxor" else "")
                 + (f'<div class=card><h2>Home Assistant</h2>{hass}</div>' if b == "homeassistant" else "")
+                + (_shelly_card(c, csrf) if b == "shelly" else "")
                 + names)
         return _page("Geräte", body, "haus", csrf)
 
@@ -348,7 +364,7 @@ def attach(app, ctx):
     async def save_backend(request: Request):
         f = await request.form()
         v = f.get("backend")
-        if v not in ("luxor", "homeassistant", "demo"):
+        if v not in ("luxor", "homeassistant", "shelly", "demo"):
             return _done(request.state.tok, "haus", False, "Bitte eine Quelle wählen.")
         hub_config.update({"backend": v})
         CTX["reset_backend"]()
@@ -402,6 +418,86 @@ def attach(app, ctx):
             return _done(request.state.tok, "haus", True, f"Home Assistant verbunden – {n} Geräte gefunden.")
         except Exception as e:
             return _done(request.state.tok, "haus", False, f"Home Assistant: {e}")
+
+    def _shelly_card(c, csrf):
+        devs = (c.get("shelly") or {}).get("devices") or []
+        kinds = [("light", "Licht / Schalter"), ("dimmer", "Dimmer"), ("blind", "Rollladen"), ("other", "Gerät (nur Strom messen)"),
+                 ("gate", "Tor / Tür (Impuls)")]
+        rows = ""
+        for dv in devs:
+            for ch in dv.get("channels") or []:
+                key = f"{dv['ip']}|{ch['ch']}"
+                opts = "".join(f'<option value="{k}" {"selected" if ch.get("kind") == k else ""}>{E(t)}</option>' for k, t in kinds)
+                rows += (f'<tr><td style="white-space:nowrap"><b>{E(dv.get("model") or "Shelly")}</b><br><span class=muted>{E(dv["ip"])} · Kanal {ch["ch"]}</span></td>'
+                         f'<td><input name="n::{key}" value="{E(ch.get("name") or "")}" placeholder="Name"></td>'
+                         f'<td><input name="r::{key}" value="{E(ch.get("room") or "")}" placeholder="Raum"></td>'
+                         f'<td><input name="f::{key}" value="{E(ch.get("floor") or "")}" placeholder="Etage"></td>'
+                         f'<td><select name="k::{key}">{opts}</select></td>'
+                         f'<td><label style="display:flex;gap:6px;align-items:center;margin:0"><input style="width:auto" type=checkbox name="h::{key}" {"checked" if ch.get("hidden") else ""}>aus</label></td></tr>')
+        table = (_form("/setup/save/shelly", f'<div style="overflow-x:auto"><table>{rows}</table></div>', csrf)
+                 if rows else '<p class=muted>Noch keine Shelly-Geräte – unten suchen.</p>')
+        scan = _form("/setup/shelly/scan", _field("net", "Netz (leer = automatisch)", "", placeholder="z. B. 192.168.0.0/24")
+                     + _field("ip", "oder eine Adresse von Hand", "", placeholder="z. B. 192.168.0.40"), csrf, "Im WLAN suchen")
+        return (f'<div class=card><h2>Shelly</h2><p class=muted>Die Geräte werden direkt im Heimnetz angesprochen – ohne Shelly-Cloud. '
+                f'Tipp: Jedem Shelly im Router eine feste Adresse geben. „aus“ blendet einen Kanal in der App aus.</p>{table}</div>'
+                f'<div class=card><h2>Shelly suchen</h2>{scan}</div>')
+
+    @app.post("/setup/shelly/scan")
+    async def shelly_scan(request: Request):
+        import asyncio
+        import shelly
+        f = await request.form()
+        try:
+            if (f.get("ip") or "").strip():
+                p = shelly.probe(f.get("ip").strip(), timeout=3)
+                found = [p] if p else []
+            else:
+                found = await asyncio.to_thread(shelly.scan, (f.get("net") or "").strip() or None)
+        except ValueError as e:
+            return _done(request.state.tok, "haus", False, f"Netz ungültig: {e}")
+        cfg = hub_config.get("shelly") or {"devices": []}
+        devs = cfg.get("devices") or []
+        known = {d["ip"] for d in devs}
+        added, locked = 0, 0
+        for p in found:
+            if p["ip"] in known:
+                continue
+            if p.get("auth"):
+                locked += 1
+                continue
+            try:
+                chans = await asyncio.to_thread(shelly.Device(p).channels)
+            except Exception:
+                continue
+            devs.append({"ip": p["ip"], "gen": p["gen"], "model": p["model"], "name": p.get("name"),
+                         "channels": [{"ch": ch, "kind": k, "name": (p.get("name") or p["model"] or "Shelly") + (f" {ch + 1}" if len(chans) > 1 else ""),
+                                       "room": "", "floor": ""} for ch, k in chans]})
+            added += 1
+        hub_config.update({"shelly": {"devices": devs}, "backend": "shelly"})
+        CTX["reset_backend"]()
+        msg = f"{len(found)} Shelly gefunden, {added} neu übernommen."
+        if locked:
+            msg += f" {locked} mit Passwort-Schutz übersprungen (in der Shelly-App die Anmeldung abschalten oder hier später unterstützen)."
+        return _done(request.state.tok, "haus", bool(found), msg if found else "Kein Shelly gefunden – sind Hub und Shelly im selben WLAN?")
+
+    @app.post("/setup/save/shelly")
+    async def save_shelly(request: Request):
+        f = await request.form()
+        cfg = hub_config.get("shelly") or {"devices": []}
+        for dv in cfg.get("devices") or []:
+            for ch in dv.get("channels") or []:
+                key = f"{dv['ip']}|{ch['ch']}"
+                if f"n::{key}" in f:
+                    ch["name"] = (f.get(f"n::{key}") or "").strip()[:40]
+                    ch["room"] = (f.get(f"r::{key}") or "").strip()[:40]
+                    ch["floor"] = (f.get(f"f::{key}") or "").strip()[:40]
+                    k = f.get(f"k::{key}")
+                    if k in ("light", "dimmer", "blind", "other", "gate"):
+                        ch["kind"] = k
+                    ch["hidden"] = bool(f.get(f"h::{key}"))
+        hub_config.update({"shelly": cfg})
+        CTX["reset_backend"]()
+        return _done(request.state.tok, "haus")
 
     @app.post("/setup/save/roomnames")
     async def save_roomnames(request: Request):
@@ -552,7 +648,203 @@ def attach(app, ctx):
             status = f'<div class="flash err">Anmeldung fehlgeschlagen: {E(st.get("error", ""))}</div>'
         login = _form("/setup/hc/login", "", csrf, "Mit Home Connect anmelden") if c["client_id"] else ""
         ready = '<p class=ok>✓ angemeldet</p>' if CTX["homeconnect"].auth.ready else ""
-        return _page("Hausgeräte", _flash(tok) + f'<div class=card><h2>Bosch / Siemens Home Connect</h2>{steps}{form}{status}{login}{ready}</div>', "geraete", csrf)
+        return _page("Hausgeräte", _flash(tok) + f'<div class=card><h2>Bosch / Siemens Home Connect</h2>{steps}{form}{status}{login}{ready}</div>'
+                     + _miele_card(csrf) + _lg_card(csrf) + _roborock_card(csrf) + _mammotion_card(csrf), "geraete", csrf)
+
+    def _lg_card(csrf):
+        lg = CTX.get("lg")
+        if lg is None:
+            return ""
+        c = hub_config.get("lgthinq") or {}
+        steps = ('<ol class=muted style="padding-left:18px">'
+                 '<li>Waschmaschine/Trockner in der <b>LG ThinQ App</b> mit dem WLAN verbinden.</li>'
+                 '<li>Auf <a style="color:var(--sun)" href="https://connect-pat.lgthinq.com" target=_blank>connect-pat.lgthinq.com</a> '
+                 'mit deinem LG-Konto anmelden → „Create token“ (alle Rechte zum Lesen anhaken) → Token kopieren.</li>'
+                 '<li>Hier einfügen und speichern. Das LG-Passwort braucht der Hub nicht.</li></ol>')
+        form = _form("/setup/lg/save",
+                     '<div class=row><div><label>Personal Access Token</label><input name=pat type=password autocomplete=off '
+                     f'placeholder="{"gespeichert – leer lassen = unverändert" if c.get("pat") else ""}"></div><div>'
+                     + _field("country", "Land (DE, AT, BR …)", c.get("country") or "DE") + '</div></div>', csrf, "Speichern & testen")
+        devs = "".join(f'<li>{E(a["name"])} – {E(a["stateText"])}</li>' for a in lg.list())
+        ok = (f'<p class=ok>✓ verbunden</p><ul class=muted>{devs}</ul>' if lg.configured and not lg.error
+              else (f'<p class=bad>{E(lg.error)}</p>' if lg.error else ""))
+        return f'<div class=card><h2>LG ThinQ</h2>{steps}{form}{ok}</div>'
+
+    @app.post("/setup/lg/save")
+    async def lg_save(request: Request):
+        import asyncio
+        f = await request.form()
+        ch = {"country": (f.get("country") or "DE").strip().upper()[:2]}
+        if (f.get("pat") or "").strip():
+            ch["pat"] = f.get("pat").strip()
+        hub_config.update({"lgthinq": ch})
+        try:
+            devs = await asyncio.to_thread(CTX["lg"].test)
+            return _done(request.state.tok, "geraete", True, f"LG ThinQ verbunden – {len(devs)} Gerät(e): " + ", ".join(d["name"] for d in devs))
+        except Exception as e:
+            CTX["lg"].error = str(e)[:160]
+            return _done(request.state.tok, "geraete", False, f"LG ThinQ: {e}")
+
+    def _miele_card(csrf):
+        m = CTX.get("miele")
+        if m is None:
+            return ""
+        import miele as mi
+        c = hub_config.get("miele") or {}
+        steps = ('<ol class=muted style="padding-left:18px">'
+                 '<li>Auf <a style="color:var(--sun)" href="https://developer.miele.com" target=_blank>developer.miele.com</a> '
+                 'mit deinem Miele-Konto anmelden und „Get involved“ → eine App registrieren.</li>'
+                 f'<li>Als Redirect-URI genau diese Adresse eintragen: <code>{E(mi.redirect_uri())}</code></li>'
+                 '<li>Client-ID und Client-Secret hier eintragen, speichern, dann „Mit Miele verbinden“ – '
+                 'die Anmeldung bei Miele machst du selbst im Browser.</li></ol>')
+        form = _form("/setup/miele/save",
+                     '<div class=row><div>' + _field("client_id", "Client-ID", c.get("client_id", ""))
+                     + '</div><div><label>Client-Secret</label><input name=client_secret type=password autocomplete=new-password '
+                       f'placeholder="{"gespeichert – leer lassen = unverändert" if c.get("client_secret") else ""}"></div></div>'
+                     + _field("redirect_uri", "Redirect-URI (nur ändern, wenn nötig)", c.get("redirect_uri", ""),
+                              placeholder=mi.redirect_uri()), csrf)
+        if m.auth.ready:
+            devs = "".join(f'<li>{E(a["name"])} – {E(a.get("stateText") or "")}</li>' for a in m.list())
+            status = (f'<p>Status: <span class=ok>verbunden</span></p>' + (f'<ul>{devs}</ul>' if devs else '<p class=muted>Suche Geräte …</p>')
+                      + _form("/setup/miele/logout", "", csrf, "Miele trennen").replace("<button>", "<button class=btn2>"))
+        else:
+            status = (f'<p><a class=btn href="/setup/miele/login">Mit Miele verbinden</a></p>' if c.get("client_id") and c.get("client_secret") else "")
+        err = f'<p class=bad>{E(m.error)}</p>' if m.error else ""
+        return f'<div class=card><h2>Miele@home</h2>{steps}{form}{status}{err}</div>'
+
+    @app.post("/setup/miele/save")
+    async def miele_save(request: Request):
+        f = await request.form()
+        cur = hub_config.get("miele") or {}
+        new = {"client_id": (f.get("client_id") or "").strip(),
+               "client_secret": (f.get("client_secret") or "").strip() or cur.get("client_secret", ""),
+               "redirect_uri": (f.get("redirect_uri") or "").strip()}
+        hub_config.update({"miele": new})
+        return _done(request.state.tok, "geraete", True, "Miele-Zugang gespeichert.")
+
+    @app.get("/setup/miele/login")
+    def miele_login(request: Request):
+        try:
+            return RedirectResponse(CTX["miele"].auth.login_url(), status_code=303)
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, str(e))
+
+    @app.post("/setup/miele/logout")
+    def miele_logout(request: Request):
+        CTX["miele"].auth.logout()
+        return _done(request.state.tok, "geraete", True, "Miele getrennt – Tokens gelöscht.")
+
+    def _mammotion_card(csrf):
+        m = CTX.get("mower")
+        if m is None:
+            return ""
+        intro = ('<p class=muted>Luba/Yuka-Mähroboter steuern. Mammotion hat keine lokale Schnittstelle – es geht über die '
+                 'Mammotion-Cloud mit E-Mail und Passwort. <b>Empfehlung:</b> in der Mammotion-App ein zweites Konto anlegen '
+                 'und den Mäher damit teilen. Die Zugangsdaten liegen nur auf dem Hub (Datei nur für '
+                 'den Hub lesbar) und erscheinen nie im Protokoll. Am besten im Heimnetz eingeben.</p>')
+        if m.configured:
+            lst = m.list()
+            devs = "".join(f'<li>{E(d.get("name") or d["id"])} – {E(d.get("stateText") or "")}'
+                           f'{" · " + str(d.get("battery")) + " %" if d.get("battery") is not None else ""}</li>'
+                           for d in lst["devices"])
+            body = (f'<p>Status: <span class=ok>angemeldet</span> als <code>{E(m.state.get("email", ""))}</code></p>'
+                    + (f'<ul>{devs}</ul>' if devs else f'<p class=muted>{E(lst.get("error") or "Suche Mähroboter …")}</p>')
+                    + _form("/setup/mammotion/rain",
+                            f'<label><input type=checkbox name=on value=1 {"checked" if lst["rainGuard"] else ""}> '
+                            'Bei Regen in den nächsten 30 Minuten zurück zur Station (Regen-Vorhersage des Hubs)</label>', csrf)
+                    + _form("/setup/mammotion/logout", "", csrf, "Mammotion abmelden").replace("<button>", "<button class=btn2>"))
+        else:
+            # eigene Feldnamen + autocomplete aus: Safari füllt hier sonst das gespeicherte Hub-Passwort ein
+            body = _form("/setup/mammotion/login",
+                         '<div class=row><div><label>E-Mail oder Mammotion-ID (Profil → Kontosicherheit)</label>'
+                         '<input name=mm_account type=text autocomplete=off autocapitalize=off spellcheck=false></div>'
+                         '<div><label>Mammotion-Passwort (nicht das Hub-Passwort)</label>'
+                         '<input name=mm_secret type=password autocomplete=new-password></div></div>'
+                         '<p class=muted style="font-size:12px">Passwort bitte selbst eintippen – der Browser schlägt hier '
+                         'evtl. das gespeicherte Hub-Passwort vor. Klappt die E-Mail nicht, die Mammotion-ID (Zahl) versuchen. '
+                         'Achtung: mit dem Hauptkonto meldet Mammotion dich in der Handy-App ab – daher besser ein zweites Konto.</p>', csrf, "Anmelden")
+        err = f'<p class=bad>{E(m.error)}</p>' if m.error and m.configured else ""
+        return f'<div class=card><h2>Mammotion Mähroboter</h2>{intro}{body}{err}</div>'
+
+    @app.post("/setup/mammotion/login")
+    async def mammotion_login(request: Request):
+        f = await request.form()
+        account = (f.get("mm_account") or f.get("email") or "").strip()
+        secret = (f.get("mm_secret") or f.get("password") or "").rstrip("\r\n")
+        if secret and people.check_setup_password(secret):
+            return _done(request.state.tok, "geraete", False,
+                         "Das war das Hub-Passwort (vom Browser automatisch eingefüllt) – bitte das Mammotion-Passwort eintippen.")
+        if secret != secret.strip():
+            return _done(request.state.tok, "geraete", False, "Das Passwort beginnt oder endet mit einem Leerzeichen – bitte prüfen.")
+        try:
+            await asyncio.to_thread(CTX["mower"].login, account, secret)
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, f"Anmeldung fehlgeschlagen: {e}")
+        return _done(request.state.tok, "geraete", True, "Mammotion angemeldet.")
+
+    @app.post("/setup/mammotion/logout")
+    def mammotion_logout(request: Request):
+        CTX["mower"].logout()
+        return _done(request.state.tok, "geraete", True, "Mammotion abgemeldet – Zugangsdaten gelöscht.")
+
+    @app.post("/setup/mammotion/rain")
+    async def mammotion_rain(request: Request):
+        f = await request.form()
+        CTX["mower"].set_rain_guard(bool(f.get("on")))
+        return _done(request.state.tok, "geraete")
+
+    def _roborock_card(csrf):
+        v = CTX.get("vacuum")
+        if v is None:
+            return ""
+        intro = ('<p class=muted>Saugroboter mit Station steuern (Status, Räume, Station, Mitteilungen). Anmeldung mit der E-Mail '
+                 'deiner Roborock-App – Roborock schickt dir einen Code per Mail. Kein Passwort nötig; gespeichert wird nur das '
+                 'Anmelde-Token, und zwar nur auf dem Hub.</p>')
+        if v.configured:
+            lst = v.list()
+            devs = "".join(f'<li>{E(d.get("name") or d["id"])} – {E(d.get("stateText") or "")}'
+                           f'{" · " + str(d.get("battery")) + " %" if d.get("battery") is not None else ""}'
+                           f'{" · lokal" if d.get("local") else ""}</li>' for d in lst["devices"])
+            body = (f'<p>Status: <span class=ok>angemeldet</span> als <code>{E(v.state.get("email", ""))}</code></p>'
+                    + (f'<ul>{devs}</ul>' if devs else f'<p class=muted>{E(lst.get("error") or "Suche Geräte …")}</p>')
+                    + _form("/setup/roborock/auto",
+                            f'<label><input type=checkbox name=on value=1 {"checked" if lst["autoAway"] else ""}> '
+                            'Saugen, wenn alle weg sind (höchstens 1× am Tag, 8–20 Uhr, Akku ≥ 50 %)</label>', csrf)
+                    + _form("/setup/roborock/logout", "", csrf, "Roborock abmelden").replace("<button>", "<button class=btn2>"))
+        else:
+            body = (_form("/setup/roborock/code", _field("email", "E-Mail der Roborock-App", v.state.get("email", ""), "email"), csrf, "Code anfordern")
+                    + _form("/setup/roborock/login", _field("code", "Code aus der E-Mail", "", placeholder="123456"), csrf, "Anmelden"))
+        err = f'<p class=bad>{E(v.error)}</p>' if v.error and v.configured else ""
+        return f'<div class=card><h2>Roborock Saugroboter</h2>{intro}{body}{err}</div>'
+
+    @app.post("/setup/roborock/code")
+    async def roborock_code(request: Request):
+        f = await request.form()
+        try:
+            await asyncio.to_thread(CTX["vacuum"].request_code, f.get("email") or "")
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, f"Code anfordern fehlgeschlagen: {e}")
+        return _done(request.state.tok, "geraete", True, "Code ist unterwegs – bitte im Postfach nachsehen und unten eingeben.")
+
+    @app.post("/setup/roborock/login")
+    async def roborock_login(request: Request):
+        f = await request.form()
+        try:
+            await asyncio.to_thread(CTX["vacuum"].login, f.get("code") or "")
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, f"Anmeldung fehlgeschlagen: {e}")
+        return _done(request.state.tok, "geraete", True, "Roborock angemeldet.")
+
+    @app.post("/setup/roborock/logout")
+    def roborock_logout(request: Request):
+        CTX["vacuum"].logout()
+        return _done(request.state.tok, "geraete", True, "Roborock abgemeldet – Token und Schlüssel gelöscht.")
+
+    @app.post("/setup/roborock/auto")
+    async def roborock_auto(request: Request):
+        f = await request.form()
+        CTX["vacuum"].set_auto_away(bool(f.get("on")))
+        return _done(request.state.tok, "geraete")
 
     @app.post("/setup/save/hc")
     async def save_hc(request: Request):
@@ -690,18 +982,20 @@ def attach(app, ctx):
     @app.get("/setup/system")
     def system(request: Request):
         tok, csrf = request.state.tok, request.state.csrf
-        latest = ""
-        try:
-            repo = hub_config.get("update.repo", "")
-            if "github.com/" in repo:
-                raw = repo.replace("github.com", "raw.githubusercontent.com") + f"/{hub_config.get('update.branch', 'main')}/hub/VERSION"
-                v = requests.get(raw, timeout=5)
-                if v.ok:
-                    latest = v.text.strip()
-        except Exception:
-            pass
-        upd = (f'<p>Installiert: <b>{E(CTX["version"])}</b>' + (f' · Neueste: <b>{E(latest)}</b>' if latest else "") + "</p>"
-               + _form("/setup/system/update", "", csrf, "Jetzt aktualisieren"))
+        u = CTX.get("updater")()
+        latest = u.available() if u else None
+        last = u.last_result() if u else None
+        mode = hub_config.get("update.mode") or "ask"
+        opts = "".join(f'<option value="{v}" {"selected" if mode == v else ""}>{t}</option>'
+                       for v, t in (("ask", "Nur mit Rückfrage (Mitteilung, dann in der App bestätigen)"),
+                                    ("auto", "Automatisch nachts (3–5 Uhr)")))
+        upd = (f'<p>Installiert: <b>{E(CTX["version"])}</b>' + (f' · Verfügbar: <b>{E(latest)}</b> (signiert)' if latest else " · aktuell") + "</p>"
+               + (f'<p class=muted>Letztes Update: {E(last.get("from", ""))} → {E(last.get("to", ""))}: {E(last.get("result", ""))}</p>' if last else "")
+               + '<p class=muted>Nur signierte Pakete werden installiert. Vorher wird gesichert; startet die neue Version nicht sauber, '
+                 'geht der Hub automatisch auf die alte zurück.</p>'
+               + _form("/setup/system/updatemode", f'<label>Updates</label><select name=mode>{opts}</select>', csrf)
+               + (_form("/setup/system/update", "", csrf, f"Jetzt auf {latest} aktualisieren") if latest
+                  else _form("/setup/system/updatecheck", "", csrf, "Jetzt nach Updates suchen")))
         pw = _form("/setup/system/password", _field("pw", "Neues Hub-Passwort", "", "password") + _field("pw2", "Wiederholen", "", "password"), csrf, "Passwort ändern")
         backup = ('<p class=muted>Enthält alles für eine Neuinstallation: Einstellungen, Zugangsdaten, Personen, Szenen, '
                   'LUXOR-Projekt, Daikin/Home-Connect-Anmeldung, evcc und Caddy. <b>Wie ein Schlüssel behandeln</b> – nur privat speichern.</p>'
@@ -728,12 +1022,52 @@ def attach(app, ctx):
                               '<label>Token von rclone</label><textarea name=token rows=4 style="width:100%" placeholder=\'{"access_token":"…"}\'></textarea>'
                               + _field("folder", "Ordner in Google Drive", "Hub-Sicherung"),
                               csrf, "Google Drive verbinden"))
-        body = (_flash(tok) + f'<div class=card><h2>Sicherung in Google Drive</h2>{drive}</div>'
+        pcfg = hub_config.get("push") or {}
+        push_ok = bool(pcfg.get("key_id") and pcfg.get("team_id") and os.path.exists(os.path.join(hub_config.DATA_DIR, "apns.p8")))
+        pushcard = ('<p class=muted>Damit der Hub Mitteilungen aufs iPhone schicken kann (Wäsche fertig, Auto geladen, Wochenbericht, '
+                    'Auto-Start) – auch wenn die App geschlossen ist. Einmalig im Apple-Developer-Konto unter '
+                    '<i>Certificates, Identifiers &amp; Profiles → Keys → +</i> einen Schlüssel mit „Apple Push Notifications service (APNs)“ '
+                    'anlegen und die .p8-Datei hier hochladen. Der Schlüssel bleibt nur auf dem Hub.</p>'
+                    + (f'<p>Status: <span class=ok>eingerichtet</span> · Key-ID <code>{E(pcfg.get("key_id", ""))}</code></p>' if push_ok else '')
+                    + _form("/setup/push/key",
+                            '<div class=row><div>' + _field("key_id", "Key-ID (10 Zeichen)", pcfg.get("key_id", ""), placeholder="ABC123DEFG")
+                            + '</div><div>' + _field("team_id", "Team-ID", pcfg.get("team_id", ""), placeholder="ABCDE12345")
+                            + '</div></div><label>APNs-Schlüssel (.p8)</label><input type=file name=p8 accept=".p8">',
+                            csrf, "Speichern", "multipart/form-data")
+                    + (_form("/setup/push/test", "", csrf, "Test-Mitteilung an alle Geräte").replace("<button>", "<button class=btn2>") if push_ok else ""))
+        body = (_flash(tok) + f'<div class=card><h2>Mitteilungen (Apple Push)</h2>{pushcard}</div>'
+                f'<div class=card><h2>Sicherung in Google Drive</h2>{drive}</div>'
                 f'<div class=card><h2>Sicherung</h2>{backup}</div>'
                 f'<div class=card><h2>Update</h2>{upd}</div><div class=card><h2>Hub-Passwort</h2>{pw}</div>'
                 f'<div class=card><h2>Fehlersuche</h2><a class="btn btn2" href="/setup/system/logs">Protokoll anzeigen</a> '
                 f'{_form("/setup/system/restart", "", csrf, "Hub neu starten").replace("<button>", "<button class=btn2>")}</div>')
         return _page("System", body, "system", csrf)
+
+    @app.post("/setup/push/key")
+    async def push_key(request: Request):
+        f = await request.form()
+        key_id = (f.get("key_id") or "").strip().upper()
+        team_id = (f.get("team_id") or "").strip().upper()
+        if not (len(key_id) == 10 and key_id.isalnum() and len(team_id) == 10 and team_id.isalnum()):
+            return _done(request.state.tok, "system", False, "Key-ID und Team-ID haben je 10 Zeichen (Buchstaben/Ziffern).")
+        up = f.get("p8")
+        if up is not None and getattr(up, "filename", ""):
+            data = await up.read()
+            if b"BEGIN PRIVATE KEY" not in data or len(data) > 4096:
+                return _done(request.state.tok, "system", False, "Das ist keine APNs-.p8-Datei.")
+            path = os.path.join(hub_config.DATA_DIR, "apns.p8")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        elif not os.path.exists(os.path.join(hub_config.DATA_DIR, "apns.p8")):
+            return _done(request.state.tok, "system", False, "Bitte die .p8-Datei auswählen.")
+        hub_config.update({"push": {"key_id": key_id, "team_id": team_id}})
+        return _done(request.state.tok, "system", True, "Mitteilungen eingerichtet. In der App unter Einstellungen → Mitteilungen einschalten.")
+
+    @app.post("/setup/push/test")
+    def push_test(request: Request):
+        n = CTX["push"].send("smart", "Test vom Hub", "Mitteilungen funktionieren.") if CTX.get("push") else 0
+        return _done(request.state.tok, "system", bool(n), f"An {n} Gerät(e) geschickt." if n else "Noch kein iPhone angemeldet (App öffnen → Einstellungen → Mitteilungen).")
 
     @app.get("/setup/system/backup")
     def do_backup(request: Request):
@@ -789,8 +1123,23 @@ def attach(app, ctx):
 
     @app.post("/setup/system/update")
     def do_update(request: Request):
-        rc, out = _hubctl("update", timeout=300)
-        return _done(request.state.tok, "system", rc == 0, (out[-300:] or "ok") + (" – der Hub startet neu." if rc == 0 else ""))
+        try:
+            CTX["updater"]().install()
+            return _done(request.state.tok, "system", True, "Update läuft – der Hub startet gleich neu. In einer Minute die Seite neu laden.")
+        except Exception as e:
+            return _done(request.state.tok, "system", False, f"Update nicht möglich: {e}")
+
+    @app.post("/setup/system/updatecheck")
+    def do_updatecheck(request: Request):
+        c = CTX["updater"]().refresh()
+        msg = f"Update {c.get('version')} verfügbar (signiert)." if c.get("available") else f"Kein neueres Paket ({c.get('reason') or 'aktuell'})."
+        return _done(request.state.tok, "system", True, msg)
+
+    @app.post("/setup/system/updatemode")
+    async def do_updatemode(request: Request):
+        f = await request.form()
+        hub_config.update({"update": {"mode": "auto" if f.get("mode") == "auto" else "ask"}})
+        return _done(request.state.tok, "system")
 
     @app.post("/setup/system/restart")
     def do_restart(request: Request):
