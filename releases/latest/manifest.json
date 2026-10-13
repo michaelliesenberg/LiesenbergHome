@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.30.0",
- "file": "hub-2.30.0.tar.gz",
- "sha256": "2610616f3e73d96a0a7fab4b449935717fac69387ff72c0984b56e2ec0f897b1",
+ "version": "2.31.0",
+ "file": "hub-2.31.0.tar.gz",
+ "sha256": "f94d27bcad61ef604309800de6898552d5c19238f4ae0089deb47f5bf669f507",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Auto-Start nach echter Sonne (\u00b12 h)",
- "created": 1791901604
+ "notes": "W\u00e4rmepumpe: Strom + COP getrennt f\u00fcr Heizen/Warmwasser",
+ "created": 1791908966
 }

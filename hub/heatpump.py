@@ -81,7 +81,7 @@ class HeatPump:
             if len(before) < 3 or len(after) < 3:
                 return
             import statistics
-            if statistics.pstdev(before) > 150 or statistics.pstdev(after) > 250:
+            if statistics.pstdev(before) > 300 or statistics.pstdev(after) > 450:
                 return                          # zu unruhig (Kochen, Waschmaschine …)
             d = statistics.median(after) - statistics.median(before)
             w = d if turned_on else -d
@@ -94,7 +94,7 @@ class HeatPump:
     def power_w(self):
         import statistics
         s = self.eff.get("samples") or []
-        return round(statistics.median(s)) if len(s) >= 3 else None
+        return round(statistics.median(s)) if len(s) >= 2 else None      # ab 2 Messungen (Median), wird mit jeder genauer
 
     def _track_day(self, c):
         """Tageswerte: Zähler Wärme (kWh) und Verdichter-Laufzeit (s) um Mitternacht merken"""
@@ -103,14 +103,25 @@ class HeatPump:
         run = c[56] if len(c) > 56 else None
         if heat is None or run is None:
             return
+        # getrennt: Wärme Heizen (151) / Warmwasser (152) in 0,1 kWh, Laufzeit Heizen (64) / Warmwasser (65) in s
+        hh, hw = c[151] / 10, c[152] / 10
+        rh, rw = (c[64] if len(c) > 64 else 0), (c[65] if len(c) > 65 else 0)
         days = self.eff.setdefault("days", {})
         if day not in days:
             days[day] = {"heat0": heat, "run0": run}
             for k in sorted(days)[:-40]:
                 days.pop(k, None)
-        days[day].update(heat=heat, run=run)
+        dd = days[day]
+        dd.setdefault("hh0", hh); dd.setdefault("hw0", hw); dd.setdefault("rh0", rh); dd.setdefault("rw0", rw)
+        dd.update(heat=heat, run=run, hh=hh, hw=hw, rh=rh, rw=rw)
         if int(time.time()) % 600 < 60:
             self._save_eff()
+
+    def _part(self, heat, secs, p):
+        """Wärme (kWh) + Laufzeit (s) → Strom (geschätzt) und COP"""
+        el = (p / 1000) * secs / 3600 if p else None
+        return {"heatKWh": round(heat, 1), "hours": round(secs / 3600, 1), "elecKWh": round(el, 1) if el else None,
+                "cop": round(heat / el, 1) if el and el > 0.2 and heat > 0 else None}
 
     def efficiency(self):
         p = self.power_w()
@@ -118,15 +129,24 @@ class HeatPump:
         for day, v in sorted((self.eff.get("days") or {}).items())[-14:]:
             dh, dr = v["heat"] - v["heat0"], (v["run"] - v["run0"]) / 3600
             el = (p / 1000) * dr if p else None
-            days.append({"day": day, "heatKWh": round(dh, 1), "hours": round(dr, 1),
-                         "elecKWh": round(el, 1) if el else None,
-                         "cop": round(dh / el, 2) if el and el > 0.3 and dh > 0 else None})
-        total = None
-        if p and self.data and self.data.get("compressorHours"):
-            el = p / 1000 * self.data["compressorHours"]
-            total = round((self.data.get("heatEnergyTotal") or 0) / el, 2) if el else None
+            row = {"day": day, "heatKWh": round(dh, 1), "hours": round(dr, 1),
+                   "elecKWh": round(el, 1) if el else None,
+                   "cop": round(dh / el, 2) if el and el > 0.3 and dh > 0 else None}
+            if "hh0" in v:
+                row["heating"] = self._part(v["hh"] - v["hh0"], v["rh"] - v["rh0"], p)
+                row["hotWater"] = self._part(v["hw"] - v["hw0"], v["rw"] - v["rw0"], p)
+            days.append(row)
+        total = since = None
+        d = self.data or {}
+        if p and d.get("compressorHours"):
+            el = p / 1000 * d["compressorHours"]
+            total = round((d.get("heatEnergyTotal") or 0) / el, 2) if el else None
+        if d.get("heatingHours") is not None:
+            since = {"heating": self._part(d.get("heatEnergyHeating") or 0, d["heatingHours"] * 3600, p),
+                     "hotWater": self._part(d.get("heatEnergyHotWater") or 0, (d.get("hotWaterHours") or 0) * 3600, p)}
         return {"powerW": p, "measurements": len(self.eff.get("samples") or []), "days": days, "copTotal": total,
-                "note": "geschätzt: Strom aus gelernter Verdichterleistung × Laufzeit"}
+                "since": since, "estimated": True,
+                "note": "Wärme gemessen (Wärmemengenzähler der Wärmepumpe), Strom geschätzt: gelernte Verdichterleistung × Laufzeit"}
 
     def _load(self):
         try:
@@ -241,6 +261,8 @@ class HeatPump:
             "status": STATUS1.get(c[117]) if len(c) > 117 else None,
             "statusDetail": STATUS3.get(c[119]) if len(c) > 119 else None,
             "compressorHours": round(c[56] / 3600) if len(c) > 56 else None,
+            "heatingHours": round(c[64] / 3600, 1) if len(c) > 64 else None,       # Betriebsstunden Heizen
+            "hotWaterHours": round(c[65] / 3600, 1) if len(c) > 65 else None,      # Betriebsstunden Warmwasser
             "compressorStarts": c[57] if len(c) > 57 else None,
             "heatEnergyHeating": e(151), "heatEnergyHotWater": e(152),
             "heatEnergyTotal": round((e(151) or 0) + (e(152) or 0), 1),
