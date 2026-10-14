@@ -936,6 +936,79 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
 
 
+# ---------------------------------------------------------------- Ankommen: Straßen rund ums Haus (fürs Tor)
+# „Tor auf, wenn man über die Straße kommt“: einmal die befahrbaren Straßen im Umkreis aus OpenStreetMap laden
+# (ohne Feld-/Waldwege, Fuß-, Rad- und Reitwege) und zwischenspeichern. Die App prüft beim Heimkommen, ob die
+# letzten Standorte auf einer dieser Straßen lagen. Gesendet wird nur der Umkreis-Mittelpunkt an Overpass (OSM).
+_ROADS_FILE = os.path.join(hub_config.DATA_DIR, "arrival-roads.json")
+_ROADS_TYPES = ("motorway|trunk|primary|secondary|tertiary|motorway_link|trunk_link|primary_link|secondary_link|"
+                "tertiary_link|unclassified|residential|living_street|service|road")
+_OVERPASS = ("https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter",
+             "https://maps.mail.ru/osm/tools/overpass/api/interpreter")
+_roads_lock = threading.Lock()
+
+
+def _roads_fetch(lat, lon, radius=1500):
+    q = (f'[out:json][timeout:60];way(around:{radius},{lat:.5f},{lon:.5f})[highway~"^({_ROADS_TYPES})$"]'
+         f'[area!=yes];out tags geom;')
+    last = "keine Antwort"
+    for url in _OVERPASS:
+        try:
+            r = requests.post(url, data={"data": q}, timeout=90,
+                              headers={"User-Agent": f"LiesenbergHome-hub/{VERSION}"})
+            if r.status_code != 200 or not r.text.lstrip().startswith("{"):
+                last = f"{url.split('/')[2]}: HTTP {r.status_code}"
+                continue
+            roads = []
+            for e in r.json().get("elements", []):
+                g = e.get("geometry") or []
+                if len(g) >= 2:
+                    roads.append([[round(p["lat"], 6), round(p["lon"], 6)] for p in g])
+            return roads, None
+        except Exception as e:
+            last = f"{url.split('/')[2]}: {e}"
+    return None, last
+
+
+def _roads_load():
+    try:
+        with open(_ROADS_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _roads_job(lat, lon, key):
+    """Im Hintergrund laden (Overpass braucht manchmal über eine Minute)."""
+    try:
+        roads, err = _roads_fetch(lat, lon)
+        if roads is None:
+            print(f"[ANWESENHEIT] Straßen laden fehlgeschlagen: {err}", flush=True)
+            return
+        data = {"key": key, "at": int(time.time()), "source": "OpenStreetMap", "roads": roads}
+        with open(_ROADS_FILE + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(_ROADS_FILE + ".tmp", _ROADS_FILE)
+        print(f"[ANWESENHEIT] {len(roads)} Straßen rund ums Haus geladen (OpenStreetMap)", flush=True)
+    finally:
+        _roads_lock.release()
+
+
+@app.get("/api/arrival/roads")
+def arrival_roads(lat: float, lon: float, refresh: bool = False, p=Depends(person)):
+    key = f"{lat:.4f},{lon:.4f}"
+    cache = _roads_load()
+    fresh = cache.get("key") == key and time.time() - cache.get("at", 0) < 60 * 86400
+    if fresh and not refresh:
+        return cache
+    loading = not _roads_lock.acquire(blocking=False)
+    if not loading:
+        threading.Thread(target=_roads_job, args=(lat, lon, key), daemon=True).start()
+    # alte Daten (gleiches Haus) weiter nutzen, bis die neuen da sind
+    roads = cache.get("roads", []) if cache.get("key") == key else []
+    return {"key": key, "roads": roads, "at": cache.get("at"), "pending": True}
+
+
 # ---------------------------------------------------------------- Ankommen/Wegfahren: eigene Geräteliste je Person
 # Jede Person wählt in der App Geräte + Zustand („beim Heimkommen: Flur an, Außenlicht 60 %“), optional nur bei Dunkelheit.
 # Gespeichert hier (übersteht Neuinstallation), ausgeführt hier – das iPhone schickt beim Ankommen nur einen kurzen Befehl.

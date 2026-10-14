@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.33.0",
- "file": "hub-2.33.0.tar.gz",
- "sha256": "a248d749f4d7dd772d6d5a394566e83a713356752dfc1fd7c50695f80dd0a524",
+ "version": "2.34.0",
+ "file": "hub-2.34.0.tar.gz",
+ "sha256": "2fc928dfaf48e6ad7b4162c950f2a5215909fc3c19ed101a3b1d05ac598c408e",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Ankommen/Wegfahren: eigene Ger\u00e4teliste je Person (Licht an/aus, Helligkeit, Rollo, Heizung), optional nur bei Dunkelheit; Zufahrt standardm\u00e4\u00dfig voller Kreis",
- "created": 1791996796
+ "notes": "Tor beim Ankommen: nur wenn man \u00fcber eine Stra\u00dfe kommt (Stra\u00dfen aus OpenStreetMap, ohne Feld-/Waldwege) \u2013 ersetzt Richtung/Keil; Ger\u00e4teliste je Person",
+ "created": 1791998567
 }
