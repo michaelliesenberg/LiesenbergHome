@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.32.0",
- "file": "hub-2.32.0.tar.gz",
- "sha256": "94c33dac24b6a2b29e99a6795b9046070b8172f3276e3a74b57ac60ea0f9b458",
+ "version": "2.33.0",
+ "file": "hub-2.33.0.tar.gz",
+ "sha256": "a248d749f4d7dd772d6d5a394566e83a713356752dfc1fd7c50695f80dd0a524",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Ankommen: Zufahrt f\u00fcrs ganze Haus (alle iPhones), Grund jeder An-/Abmeldung im Protokoll",
- "created": 1791991274
+ "notes": "Ankommen/Wegfahren: eigene Ger\u00e4teliste je Person (Licht an/aus, Helligkeit, Rollo, Heizung), optional nur bei Dunkelheit; Zufahrt standardm\u00e4\u00dfig voller Kreis",
+ "created": 1791996796
 }

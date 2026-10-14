@@ -936,6 +936,98 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
 
 
+# ---------------------------------------------------------------- Ankommen/Wegfahren: eigene Geräteliste je Person
+# Jede Person wählt in der App Geräte + Zustand („beim Heimkommen: Flur an, Außenlicht 60 %“), optional nur bei Dunkelheit.
+# Gespeichert hier (übersteht Neuinstallation), ausgeführt hier – das iPhone schickt beim Ankommen nur einen kurzen Befehl.
+# Tore/Türen sind NIE Teil der Liste (das Tor öffnet die App mit ihren eigenen Regeln).
+_ARRIVAL_ACTIONS_FILE = os.path.join(hub_config.DATA_DIR, "arrival-actions.json")
+_arrival_lock = threading.Lock()
+
+
+def _arrival_actions_all():
+    try:
+        with open(_ARRIVAL_ACTIONS_FILE) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _clean_list(v):
+    v = v if isinstance(v, dict) else {}
+    out = []
+    for a in (v.get("actions") or [])[:80]:
+        if not isinstance(a, dict) or not a.get("fid"):
+            continue
+        b = {k: a[k] for k in ("fid", "name", "on", "level", "position", "target") if a.get(k) is not None}
+        if a.get("when") in ("always", "dark"):
+            b["when"] = a["when"]
+        out.append(b)
+    return {"onlyDark": bool(v.get("onlyDark", False)), "actions": out}
+
+
+def _is_dark(now=None):
+    now = now or datetime.now()
+    rise = _scenes._sun_time(now.date(), rising=True)
+    sset = _scenes._sun_time(now.date(), rising=False)
+    if rise is None or sset is None:
+        return now.hour >= 19 or now.hour < 7
+    return now < rise or now > sset
+
+
+@app.get("/api/arrival/actions")
+def arrival_actions_get(p=Depends(person)):
+    mine = _arrival_actions_all().get(p["id"], {})
+    return {"arrive": _clean_list(mine.get("arrive")), "leave": _clean_list(mine.get("leave")), "dark": _is_dark()}
+
+
+@app.put("/api/arrival/actions")
+async def arrival_actions_put(request: Request, p=Depends(person)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Ungültig")
+    with _arrival_lock:
+        allp = _arrival_actions_all()
+        allp[p["id"]] = {"arrive": _clean_list(body.get("arrive")), "leave": _clean_list(body.get("leave"))}
+        with open(_ARRIVAL_ACTIONS_FILE + ".tmp", "w") as f:
+            json.dump(allp, f)
+        os.replace(_ARRIVAL_ACTIONS_FILE + ".tmp", _ARRIVAL_ACTIONS_FILE)
+    return {"arrive": allp[p["id"]]["arrive"], "leave": allp[p["id"]]["leave"], "dark": _is_dark()}
+
+
+@app.post("/api/arrival/run")
+def arrival_actions_run(phase: str = "arrive", p=Depends(person)):
+    if phase not in ("arrive", "leave"):
+        raise HTTPException(status_code=400, detail="phase = arrive oder leave")
+    lst = _clean_list(_arrival_actions_all().get(p["id"], {}).get(phase))
+    dark = _is_dark()
+    h = home()
+    if h is None:
+        raise HTTPException(status_code=503, detail="Kein Haus eingerichtet")
+    idx = devices.device_index(h.structure())
+    done, skipped, errors = [], 0, []
+    for a in lst["actions"]:
+        when = a.get("when") or ("dark" if lst["onlyDark"] else "always")
+        if when == "dark" and not dark:
+            skipped += 1
+            continue
+        did = _scenes.Scenes._did(a)
+        d = idx.get(did)
+        if not d or d["kind"] == "gate":
+            continue
+        cmd = _scenes.Scenes._cmd(d["kind"], a, "start")
+        if not cmd:
+            continue
+        try:
+            h.command(did, cmd)
+            done.append(d["name"])
+        except Exception as e:
+            errors.append(f"{d['name']}: {e}")
+    print(f"[{'ANKOMMEN' if phase == 'arrive' else 'WEGFAHREN'}] {p['name']}: {len(done)} Geräte"
+          + (f", {skipped} nur bei Dunkelheit übersprungen" if skipped else "") + (f", Fehler {errors[:3]}" if errors else ""), flush=True)
+    return {"ok": not errors, "done": done, "skipped": skipped, "dark": dark, "errors": errors[:5]}
+
+
 # ---------------------------------------------------------------- Ältere App-Versionen (LUXOR direkt)
 @app.get("/api/luxor/project")
 def luxor_project(p=Depends(can_edit)):
@@ -1569,7 +1661,7 @@ _ARRIVAL_FILE = os.path.join(hub_config.DATA_DIR, "arrival-rules.json")
 
 class ArrivalRules(BaseModel):
     approachBearing: float | None = None
-    approachWidth: float = 70
+    approachWidth: float = 360     # Standard: voller Kreis (aus jeder Richtung)
     minAwayMeters: float = 500
 
 
