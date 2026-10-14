@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.31.0",
- "file": "hub-2.31.0.tar.gz",
- "sha256": "f94d27bcad61ef604309800de6898552d5c19238f4ae0089deb47f5bf669f507",
+ "version": "2.32.0",
+ "file": "hub-2.32.0.tar.gz",
+ "sha256": "94c33dac24b6a2b29e99a6795b9046070b8172f3276e3a74b57ac60ea0f9b458",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "W\u00e4rmepumpe: Strom + COP getrennt f\u00fcr Heizen/Warmwasser",
- "created": 1791908966
+ "notes": "Ankommen: Zufahrt f\u00fcrs ganze Haus (alle iPhones), Grund jeder An-/Abmeldung im Protokoll",
+ "created": 1791991274
 }

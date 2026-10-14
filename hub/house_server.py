@@ -1541,10 +1541,14 @@ def someone_home():
 
 class Presence(BaseModel):
     home: bool
+    note: str | None = None      # z. B. „Tor automatisch geöffnet“ / „Nicht automatisch: …“ (fürs Nachvollziehen)
+    build: str | None = None
 
 
 @app.post("/api/presence")
 def presence(body: Presence, p=Depends(person)):
+    print(f"[ANWESENHEIT] {p['name']}: {'da' if body.home else 'weg'}"
+          + (f" – {body.note[:300]}" if body.note else "") + (f" (App {body.build[:20]})" if body.build else ""), flush=True)
     _presence[p["id"]] = (body.home, time.time())
     try:
         with open(_PRESENCE_FILE + ".tmp", "w") as f:
@@ -1555,6 +1559,45 @@ def presence(body: Presence, p=Depends(person)):
     all_away = someone_home() is False
     vacuum.on_presence(all_away)
     return {"ok": True, "allAway": all_away}
+
+
+# ---------------------------------------------------------------- Ankommen: gemeinsame Regeln fürs ganze Haus
+# Zufahrt (Richtung/Breite) und „vorher mindestens weg“ gelten für alle iPhones im Haushalt –
+# einmal eingestellt (Besitzer/Vollzugriff), alle Apps holen sie sich. Nichts davon löst selbst etwas aus.
+_ARRIVAL_FILE = os.path.join(hub_config.DATA_DIR, "arrival-rules.json")
+
+
+class ArrivalRules(BaseModel):
+    approachBearing: float | None = None
+    approachWidth: float = 70
+    minAwayMeters: float = 500
+
+
+def _arrival_rules():
+    try:
+        with open(_ARRIVAL_FILE) as f:
+            return ArrivalRules(**json.load(f)).model_dump()
+    except (OSError, ValueError, TypeError):
+        return ArrivalRules().model_dump()
+
+
+@app.get("/api/arrival/rules")
+def arrival_rules_get(p=Depends(person)):
+    return _arrival_rules()
+
+
+@app.put("/api/arrival/rules")
+def arrival_rules_put(body: ArrivalRules, p=Depends(can_edit)):
+    r = body.model_dump()
+    if r["approachBearing"] is not None:
+        r["approachBearing"] = float(r["approachBearing"]) % 360
+    r["approachWidth"] = min(360.0, max(20.0, float(r["approachWidth"])))
+    r["minAwayMeters"] = min(5000.0, max(100.0, float(r["minAwayMeters"])))
+    with open(_ARRIVAL_FILE + ".tmp", "w") as f:
+        json.dump(r, f)
+    os.replace(_ARRIVAL_FILE + ".tmp", _ARRIVAL_FILE)
+    print(f"[ANWESENHEIT] {p['name']}: Zufahrt fürs Haus {r}", flush=True)
+    return r
 
 
 # ---------------------------------------------------------------- Saugroboter-Zeitpläne
