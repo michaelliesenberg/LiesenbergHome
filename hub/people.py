@@ -51,7 +51,9 @@ def _save(d):
 
 
 def _public(p):
-    return {k: p.get(k) for k in ("id", "name", "role", "created", "last_seen")}
+    q = {k: p.get(k) for k in ("id", "name", "role", "created", "last_seen")}
+    q["gate"] = bool(p.get("gate"))          # „Tor bedienen“ auch ohne Vollzugriff (z. B. Haushaltshilfe)
+    return q
 
 
 def list_people():
@@ -147,6 +149,20 @@ def remove(pid: str):
         d = _load()
         d["people"] = [p for p in d["people"] if p["id"] != pid]
         d["invites"] = [i for i in d["invites"] if i["person"] != pid]
+        _save(d)
+
+
+def set_gate(pid: str, allowed: bool):
+    """Einzelrecht „Tor bedienen“ (Tore/Türen öffnen, auch beim Heimkommen) – unabhängig von der Rolle."""
+    with _lock:
+        d = _load()
+        found = False
+        for p in d["people"]:
+            if p["id"] == pid:
+                p["gate"] = bool(allowed)
+                found = True
+        if not found:
+            raise ValueError("Person unbekannt")
         _save(d)
 
 

@@ -21,6 +21,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import json
+import math
 import os
 import re
 import socket
@@ -299,6 +300,14 @@ PERMS = {
 }
 
 
+def perms(p):
+    """Rechte der Person: Rolle + Einzelrecht „Tor bedienen“ (Gäste dürfen dann Tore/Türen, sonst nichts mehr)."""
+    r = dict(PERMS[p["role"]])
+    if p.get("gate"):
+        r["restricted"] = True
+    return r
+
+
 # ---------------------------------------------------------------- Allgemein
 @app.get("/api/health")
 def health():
@@ -307,7 +316,7 @@ def health():
 
 @app.get("/api/me")
 def me(p=Depends(person)):
-    return {"person": p, "permissions": PERMS[p["role"]], "home": home_info()}
+    return {"person": p, "permissions": perms(p), "home": home_info()}
 
 
 class JoinRequest(BaseModel):
@@ -323,13 +332,13 @@ def join(body: JoinRequest, request: Request):
     if not key:
         _fails.setdefault(ip, []).append(time.time())
         raise HTTPException(status_code=404, detail="Einladung ungültig oder abgelaufen")
-    return {"key": key, "person": p, "permissions": PERMS[p["role"]], "home": home_info()}
+    return {"key": key, "person": p, "permissions": perms(p), "home": home_info()}
 
 
 # ---------------------------------------------------------------- Haus & Geräte
 def _visible(s, p):
     """Gäste sehen Tore/Türen gar nicht erst (Heizung: nur anschauen, nicht ändern)."""
-    if PERMS[p["role"]]["restricted"]:
+    if perms(p)["restricted"]:
         return s
     for fl in s["floors"]:
         for r in fl["rooms"]:
@@ -361,7 +370,7 @@ async def home_command(did: str, request: Request, p=Depends(person)):
     d = devices.device_index(structure()).get(did)
     if not d:
         raise HTTPException(status_code=404, detail="Gerät unbekannt")
-    if d.get("restricted") and not PERMS[p["role"]]["restricted"]:
+    if d.get("restricted") and not perms(p)["restricted"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     if d["kind"] == "heating" and not PERMS[p["role"]]["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
@@ -423,6 +432,20 @@ def people_role(pid: str, body: RoleChange, p=Depends(owner)):
         people.set_role(pid, body.role)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+class GateChange(BaseModel):
+    gate: bool
+
+
+@app.put("/api/people/{pid}/gate")
+def people_gate(pid: str, body: GateChange, p=Depends(owner)):
+    try:
+        people.set_gate(pid, body.gate)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    print(f"[PERSONEN] {p['name']}: Tor bedienen für {pid} {'an' if body.gate else 'aus'}", flush=True)
     return {"ok": True}
 
 
@@ -931,7 +954,7 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
     if phase not in ("start", "stop"):
         raise HTTPException(status_code=400, detail="phase = start oder stop")
     try:
-        return scenes.run(sid, phase, allow_gates=PERMS[p["role"]]["restricted"])   # Gäste lösen keine Tore aus
+        return scenes.run(sid, phase, allow_gates=perms(p)["restricted"])   # Gäste lösen keine Tore aus
     except KeyError:
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
 
@@ -981,11 +1004,16 @@ def _roads_load():
 def _roads_job(lat, lon, key):
     """Im Hintergrund laden (Overpass braucht manchmal über eine Minute)."""
     try:
-        roads, err = _roads_fetch(lat, lon)
+        roads, err = None, None
+        for attempt in range(3):                      # OSM-Server sind oft ausgelastet → bis zu 3 Runden
+            roads, err = _roads_fetch(lat, lon)
+            if roads is not None:
+                break
+            print(f"[ANWESENHEIT] Straßen laden fehlgeschlagen (Versuch {attempt + 1}/3): {err}", flush=True)
+            time.sleep(60 * (attempt + 1))
         if roads is None:
-            print(f"[ANWESENHEIT] Straßen laden fehlgeschlagen: {err}", flush=True)
             return
-        data = {"key": key, "at": int(time.time()), "source": "OpenStreetMap", "roads": roads}
+        data = {"key": key, "lat": lat, "lon": lon, "at": int(time.time()), "source": "OpenStreetMap", "roads": roads}
         with open(_ROADS_FILE + ".tmp", "w") as f:
             json.dump(data, f)
         os.replace(_ROADS_FILE + ".tmp", _ROADS_FILE)
@@ -998,14 +1026,18 @@ def _roads_job(lat, lon, key):
 def arrival_roads(lat: float, lon: float, refresh: bool = False, p=Depends(person)):
     key = f"{lat:.4f},{lon:.4f}"
     cache = _roads_load()
-    fresh = cache.get("key") == key and time.time() - cache.get("at", 0) < 60 * 86400
+    # gleiches Haus, auch wenn jedes iPhone sein „Zuhause“ ein paar Meter anders gespeichert hat (< 300 m)
+    same = cache.get("key") == key or (cache.get("lat") is not None and
+                                       math.hypot((cache["lat"] - lat) * 111320,
+                                                  (cache["lon"] - lon) * 111320 * math.cos(math.radians(lat))) < 300)
+    fresh = same and time.time() - cache.get("at", 0) < 60 * 86400
     if fresh and not refresh:
         return cache
     loading = not _roads_lock.acquire(blocking=False)
     if not loading:
         threading.Thread(target=_roads_job, args=(lat, lon, key), daemon=True).start()
     # alte Daten (gleiches Haus) weiter nutzen, bis die neuen da sind
-    roads = cache.get("roads", []) if cache.get("key") == key else []
+    roads = cache.get("roads", []) if same else []
     return {"key": key, "roads": roads, "at": cache.get("at"), "pending": True}
 
 

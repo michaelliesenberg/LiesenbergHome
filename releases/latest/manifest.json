@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.34.0",
- "file": "hub-2.34.0.tar.gz",
- "sha256": "2fc928dfaf48e6ad7b4162c950f2a5215909fc3c19ed101a3b1d05ac598c408e",
+ "version": "2.35.0",
+ "file": "hub-2.35.0.tar.gz",
+ "sha256": "62706612292f6d7dcefb4bfde9bf746b32f6ed9b63a62558136d9f92ce1f1af6",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -44,6 +44,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Tor beim Ankommen: nur wenn man \u00fcber eine Stra\u00dfe kommt (Stra\u00dfen aus OpenStreetMap, ohne Feld-/Waldwege) \u2013 ersetzt Richtung/Keil; Ger\u00e4teliste je Person",
- "created": 1791998567
+ "notes": "Einzelrecht \u201eTor bedienen\u201c pro Person (z. B. G\u00e4ste/Haushaltshilfe); Stra\u00dfen f\u00fcrs Tor: gemeinsame Hausposition, mehr Versuche bei OSM-Fehlern",
+ "created": 1792070211
 }
