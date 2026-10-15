@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.35.0",
- "file": "hub-2.35.0.tar.gz",
- "sha256": "62706612292f6d7dcefb4bfde9bf746b32f6ed9b63a62558136d9f92ce1f1af6",
+ "version": "2.36.0",
+ "file": "hub-2.36.0.tar.gz",
+ "sha256": "eed194f9d80acd9d34d557fc0d7750aeec54ea5ab22db055435be848a9c06134",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -11,6 +11,7 @@
   "devices.py",
   "energy_log.py",
   "forecast.py",
+  "gate_ped.py",
   "geo_ref.py",
   "ha.py",
   "heatpump.py",
@@ -44,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Einzelrecht \u201eTor bedienen\u201c pro Person (z. B. G\u00e4ste/Haushaltshilfe); Stra\u00dfen f\u00fcrs Tor: gemeinsame Hausposition, mehr Versuche bei OSM-Fehlern",
- "created": 1792070211
+ "notes": "Tor: Fu\u00dfg\u00e4nger-Modus (Ablauf aus Impulsen und Wartezeiten, vom Besitzer festgelegt und best\u00e4tigt; Sperre gegen andere Tor-Befehle)",
+ "created": 1792083811
 }

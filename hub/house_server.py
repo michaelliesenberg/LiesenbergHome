@@ -372,6 +372,8 @@ async def home_command(did: str, request: Request, p=Depends(person)):
         raise HTTPException(status_code=404, detail="Gerät unbekannt")
     if d.get("restricted") and not perms(p)["restricted"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
+    if d.get("restricted") and pedestrian.busy():
+        raise HTTPException(status_code=409, detail="Fußgänger-Ablauf läuft gerade – bitte warten")
     if d["kind"] == "heating" and not PERMS[p["role"]]["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     try:
@@ -957,6 +959,68 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
         return scenes.run(sid, phase, allow_gates=perms(p)["restricted"])   # Gäste lösen keine Tore aus
     except KeyError:
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
+
+
+# ---------------------------------------------------------------- Tor: Fußgänger-Modus
+import gate_ped as _gate_ped  # noqa: E402
+
+pedestrian = _gate_ped.Pedestrian(lambda did, cmd: need_home().command(did, cmd),
+                                  lambda title, body: push.send("weekly", title, body))
+
+
+def _gate_devices():
+    try:
+        return [{"id": d_id, "name": d["name"]} for d_id, d in devices.device_index(structure()).items() if d["kind"] == "gate"]
+    except Exception:
+        return []
+
+
+def _need_gate(p):
+    if not perms(p)["restricted"]:
+        raise HTTPException(status_code=403, detail="Kein Tor-Recht")
+    return p
+
+
+@app.get("/api/gate/pedestrian")
+def gate_ped_get(p=Depends(person)):
+    _need_gate(p)
+    cfg = pedestrian.load()
+    gates = _gate_devices()
+    if not cfg["devices"]:                       # Vorschlag aus den Namen (Michael: „öffnen“ + Start/Stop/Auf-Taster)
+        for g in gates:
+            n = g["name"].lower()
+            if "außen" in n and "öffnen" in n:
+                cfg["devices"]["open"] = g["id"]
+            elif "außen" in n and "schließen" in n:
+                cfg["devices"]["step"] = g["id"]
+    return {**cfg, "gates": gates, "problem": pedestrian.problem(cfg), "state": pedestrian.state}
+
+
+@app.put("/api/gate/pedestrian")
+async def gate_ped_put(request: Request, p=Depends(owner)):
+    cfg = pedestrian.save(await request.json())
+    print(f"[TOR] {p['name']}: Fußgänger-Ablauf gespeichert {cfg}", flush=True)
+    return {**cfg, "problem": pedestrian.problem(cfg)}
+
+
+@app.post("/api/gate/pedestrian/run")
+def gate_ped_run(p=Depends(person)):
+    _need_gate(p)
+    try:
+        r = pedestrian.start(p["name"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    print(f"[TOR] {p['name']}: Fußgänger-Ablauf gestartet ({r['seconds']:.1f} s)", flush=True)
+    return r
+
+
+@app.post("/api/gate/pedestrian/cancel")
+def gate_ped_cancel(p=Depends(person)):
+    _need_gate(p)
+    pedestrian.cancel()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- Ankommen: Straßen rund ums Haus (fürs Tor)
