@@ -179,6 +179,7 @@ def home():
             obj = None
         if obj is not None:
             _wrap_for_consumers(obj)
+            _wrap_pedestrian(obj)
         _backend.update(key=key, obj=obj)
     return _backend["obj"]
 
@@ -208,6 +209,43 @@ def _wrap_for_consumers(obj):
             c.note_command()                # Zentral aus: viele Lichter gleichzeitig, nicht zuordnen
         return orig_off()
     obj.central_off = central_off
+
+
+PED_ID = "ped:tor"
+
+
+def _wrap_pedestrian(obj):
+    """Fußgänger-Modus als eigenes „Gerät“ (Typ Tor) im Raum des Tors – damit er in Szenen, Räumen und Siri
+    auswählbar ist. „Auslösen“ startet die gesperrte Abfolge (nur wenn vom Besitzer bestätigt)."""
+    orig_struct, orig_cmd = obj.structure, obj.command
+
+    def structure():
+        s = orig_struct()
+        try:
+            cfg = pedestrian.load()
+            open_id = cfg["devices"].get("open")
+            target, name = None, "Tor"
+            for fl in s.get("floors", []):
+                for r in fl.get("rooms", []):
+                    for d in r.get("devices", []):
+                        if d.get("kind") == "gate" and (d["id"] == open_id or (target is None and open_id is None)):
+                            target, name = r, d["name"].replace(" öffnen", "").replace(" schließen", "")
+            if target is not None and not any(d["id"] == PED_ID for d in target["devices"]):
+                target["devices"].append({"id": PED_ID, "name": f"{name} – Fußgänger", "kind": "gate", "restricted": True})
+        except Exception as e:
+            print(f"[TOR] Fußgänger-Gerät: {e}", flush=True)
+        return s
+
+    def command(did, cmd):
+        if did != PED_ID:
+            return orig_cmd(did, cmd)
+        if not cmd.get("trigger") and not cmd.get("on"):
+            return None                               # „aus“ (z. B. Szenen-Stopp) → nichts tun
+        try:
+            return pedestrian.start("Szene/Befehl")
+        except (ValueError, RuntimeError) as e:
+            raise RuntimeError(str(e))
+    obj.structure, obj.command = structure, command
 
 
 def need_home():
