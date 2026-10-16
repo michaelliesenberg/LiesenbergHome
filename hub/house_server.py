@@ -225,11 +225,13 @@ def _wrap_pedestrian(obj):
             cfg = pedestrian.load()
             open_id = cfg["devices"].get("open")
             target, name = None, "Tor"
-            for fl in s.get("floors", []):
-                for r in fl.get("rooms", []):
-                    for d in r.get("devices", []):
-                        if d.get("kind") == "gate" and (d["id"] == open_id or (target is None and open_id is None)):
-                            target, name = r, d["name"].replace(" öffnen", "").replace(" schließen", "")
+            # nur wenn der Ablauf eingerichtet und bestätigt ist – und dann im Raum des gewählten „öffnen“-Ausgangs
+            if cfg["confirmed"] and open_id:
+                for fl in s.get("floors", []):
+                    for r in fl.get("rooms", []):
+                        for d in r.get("devices", []):
+                            if d["id"] == open_id:
+                                target, name = r, d["name"].replace(" öffnen", "").replace(" schließen", "")
             if target is not None and not any(d["id"] == PED_ID for d in target["devices"]):
                 target["devices"].append({"id": PED_ID, "name": f"{name} – Fußgänger", "kind": "gate", "restricted": True})
         except Exception as e:

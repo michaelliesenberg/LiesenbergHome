@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.37.1",
- "file": "hub-2.37.1.tar.gz",
- "sha256": "c32e2b452ead050151ea0c386f13e8e283512560862bb69cae30d01033df440d",
+ "version": "2.37.2",
+ "file": "hub-2.37.2.tar.gz",
+ "sha256": "0175890684f4a5b7f600538f985e9a2817034d5ddf2cd404a4d8df6b8a75ddde",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger als Tor-Ger\u00e4t f\u00fcr Szenen; \u201eNach Updates suchen\u201c in der App, Hub schaut st\u00fcndlich nach Updates",
- "created": 1792133219
+ "notes": "Fu\u00dfg\u00e4nger-Ger\u00e4t nur nach best\u00e4tigtem Ablauf und im Raum des Tors (nicht bei der Haust\u00fcr)",
+ "created": 1792133728
 }
