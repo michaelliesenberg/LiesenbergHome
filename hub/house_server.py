@@ -541,6 +541,15 @@ def hub_version(p=Depends(person)):
             "mode": hub_config.get("update.mode") or "ask", "last": u.last_result() if u else None}
 
 
+@app.post("/api/hub/check")
+def hub_check(p=Depends(can_edit)):
+    """Sofort bei GitHub nach einem neuen, signierten Paket schauen (installiert nichts)."""
+    if updater is None:
+        raise HTTPException(status_code=503, detail="Updater startet noch")
+    updater.refresh()
+    return hub_version(p)
+
+
 @app.post("/api/hub/update")
 def hub_update(p=Depends(can_edit)):   # Besitzer + Vollzugriff, Gäste nicht
     """Signiertes Paket installieren: Sicherung → Installation → Gesundheitscheck → sonst automatisch zurück."""

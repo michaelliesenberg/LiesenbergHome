@@ -82,5 +82,5 @@ class Updater:
                                        "In der App auf „Aktualisieren“ tippen – geprüft, gesichert, bei Problemen automatisch zurück.")
             except Exception as e:
                 print(f"[UPDATE] {e}", flush=True)
-            # nachts öfter schauen (für „auto“), sonst alle 6 Stunden
-            time.sleep(1800 if 2 <= datetime.now().hour < 5 else 6 * 3600)
+            # nachts öfter schauen (für „auto“), sonst stündlich (neue Versionen sollen schnell in der App auftauchen)
+            time.sleep(1800 if 2 <= datetime.now().hour < 5 else 3600)

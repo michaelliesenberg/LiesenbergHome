@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.37.0",
- "file": "hub-2.37.0.tar.gz",
- "sha256": "5d2b71e79895a9bfd5f1e6e832e94d48cbe5b376ed39b501d732f53a8c3427fe",
+ "version": "2.37.1",
+ "file": "hub-2.37.1.tar.gz",
+ "sha256": "c32e2b452ead050151ea0c386f13e8e283512560862bb69cae30d01033df440d",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger-Modus als eigenes Tor-Ger\u00e4t (in Szenen, R\u00e4umen und Siri ausw\u00e4hlbar)",
- "created": 1792130267
+ "notes": "Fu\u00dfg\u00e4nger als Tor-Ger\u00e4t f\u00fcr Szenen; \u201eNach Updates suchen\u201c in der App, Hub schaut st\u00fcndlich nach Updates",
+ "created": 1792133219
 }
