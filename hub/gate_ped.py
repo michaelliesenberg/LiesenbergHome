@@ -39,7 +39,8 @@ def clean(cfg):
             steps.append({"pulse": s["pulse"]})
         elif isinstance(s, dict) and isinstance(s.get("wait"), (int, float)):
             steps.append({"wait": round(max(0.2, min(MAX_WAIT, float(s["wait"]))), 1)})
-    return {"devices": devs, "steps": steps, "confirmed": bool(cfg.get("confirmed"))}
+    trig = str(cfg.get("trigger") or "") or None          # Gerät, dessen Einschalten den Ablauf startet (z. B. „Pedestrien“)
+    return {"devices": devs, "steps": steps, "confirmed": bool(cfg.get("confirmed")), "trigger": trig}
 
 
 class Pedestrian:
@@ -93,6 +94,34 @@ class Pedestrian:
 
     def cancel(self):
         self._cancel.set()
+
+    # ---- Auslöser: Einschalten eines Geräts (Taster „Garage T4“ / Szene schaltet „Pedestrien“ an)
+    def watch(self, read_fn, interval=0.5):
+        """read_fn(device_id) → True/False/None. Startet den Ablauf bei „aus → an“ (nicht beim automatischen Ausgehen,
+        nicht beim Hub-Start, wenn er schon an ist). Läuft schon ein Ablauf, wird das Einschalten ignoriert."""
+        def loop():
+            prev, prev_id = None, None
+            while True:
+                try:
+                    trig = self.load().get("trigger")
+                    if trig != prev_id:
+                        prev, prev_id = None, trig
+                    if trig:
+                        on = read_fn(trig)
+                        if on is True and prev is False:
+                            if self.busy():
+                                print("[TOR] Fußgänger-Taster: Ablauf läuft schon – ignoriert", flush=True)
+                            elif self.problem():
+                                print(f"[TOR] Fußgänger-Taster: {self.problem()}", flush=True)
+                            else:
+                                self.start("Taster/Pedestrien")
+                        if on is not None:
+                            prev = on
+                except Exception as e:
+                    print(f"[TOR] Fußgänger-Taster: {e}", flush=True)
+                    time.sleep(5)
+                self.sleep_fn(interval)
+        threading.Thread(target=loop, daemon=True).start()
 
     def _run(self, cfg, who):
         result = "ok"

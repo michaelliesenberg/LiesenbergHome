@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.37.2",
- "file": "hub-2.37.2.tar.gz",
- "sha256": "0175890684f4a5b7f600538f985e9a2817034d5ddf2cd404a4d8df6b8a75ddde",
+ "version": "2.38.0",
+ "file": "hub-2.38.0.tar.gz",
+ "sha256": "5d9706d1f5cd3029ddbe5c83100f51f629efc61ecf154d5bc196cd03b9049f80",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger-Ger\u00e4t nur nach best\u00e4tigtem Ablauf und im Raum des Tors (nicht bei der Haust\u00fcr)",
- "created": 1792133728
+ "notes": "Fu\u00dfg\u00e4nger-Ablauf startet auch, wenn \u201ePedestrien\u201c angeht (Taster Garage / Szene)",
+ "created": 1792134209
 }

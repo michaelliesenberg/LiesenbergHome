@@ -221,8 +221,11 @@ def _wrap_pedestrian(obj):
 
     def structure():
         s = orig_struct()
+        ped = globals().get("pedestrian")
+        if ped is None:                               # beim Hub-Start noch nicht geladen
+            return s
         try:
-            cfg = pedestrian.load()
+            cfg = ped.load()
             open_id = cfg["devices"].get("open")
             target, name = None, "Tor"
             # nur wenn der Ablauf eingerichtet und bestätigt ist – und dann im Raum des gewählten „öffnen“-Ausgangs
@@ -1030,11 +1033,30 @@ def _need_gate(p):
     return p
 
 
+def _read_on(did):
+    """Ein/Aus-Zustand eines LUXOR-Ausgangs direkt lesen (auch bei Impuls-Geräten, über „StatusOnOff“)."""
+    h = home()
+    if h is None or not hasattr(h, "_functions"):
+        return None
+    f = h._functions().get(did)
+    dp = f and (f["datapoints"].get("StatusOnOff") or f["datapoints"].get("OnOff"))
+    rest = devices.lxp_rest(dp) if dp else None
+    v = h.luxor.get(rest) if rest else None
+    return None if v is None else bool(v)
+
+
+pedestrian.watch(_read_on)
+
+
 @app.get("/api/gate/pedestrian")
 def gate_ped_get(p=Depends(person)):
     _need_gate(p)
     cfg = pedestrian.load()
     gates = _gate_devices()
+    if not cfg.get("trigger"):                   # Vorschlag: LUXOR-Ausgang „Pedestrien“ als Auslöser (Taster Garage)
+        for d_id, d in devices.device_index(structure()).items():
+            if "pedestri" in d["name"].lower() and d_id != PED_ID:
+                cfg["trigger"] = d_id
     if not cfg["devices"]:                       # Vorschlag aus den Namen (Michael: „öffnen“ + Start/Stop/Auf-Taster)
         for g in gates:
             n = g["name"].lower()
