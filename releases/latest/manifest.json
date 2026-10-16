@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.38.0",
- "file": "hub-2.38.0.tar.gz",
- "sha256": "5d9706d1f5cd3029ddbe5c83100f51f629efc61ecf154d5bc196cd03b9049f80",
+ "version": "2.38.1",
+ "file": "hub-2.38.1.tar.gz",
+ "sha256": "401a27353b64a63dd5c17568c87072544dc45904355f97ffdcb17b485c452741",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger-Ablauf startet auch, wenn \u201ePedestrien\u201c angeht (Taster Garage / Szene)",
- "created": 1792134209
+ "notes": "Fu\u00dfg\u00e4nger-Ablauf: auch Vollzugriff darf ihn einrichten",
+ "created": 1792134784
 }
