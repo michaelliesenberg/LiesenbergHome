@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.38.1",
- "file": "hub-2.38.1.tar.gz",
- "sha256": "401a27353b64a63dd5c17568c87072544dc45904355f97ffdcb17b485c452741",
+ "version": "2.38.2",
+ "file": "hub-2.38.2.tar.gz",
+ "sha256": "63048598b03d830d487b77d28b89fc2e7ceb86c074933f23422d0677d404be08",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger-Ablauf: auch Vollzugriff darf ihn einrichten",
- "created": 1792134784
+ "notes": "Fu\u00dfg\u00e4nger-Ablauf: jeder mit Tor-Recht darf ihn einrichten",
+ "created": 1792135505
 }

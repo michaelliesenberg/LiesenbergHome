@@ -1068,7 +1068,8 @@ def gate_ped_get(p=Depends(person)):
 
 
 @app.put("/api/gate/pedestrian")
-async def gate_ped_put(request: Request, p=Depends(can_edit)):     # Besitzer + Vollzugriff
+async def gate_ped_put(request: Request, p=Depends(person)):       # jeder, der das Tor bedienen darf
+    _need_gate(p)
     cfg = pedestrian.save(await request.json())
     print(f"[TOR] {p['name']}: Fußgänger-Ablauf gespeichert {cfg}", flush=True)
     return {**cfg, "problem": pedestrian.problem(cfg)}
