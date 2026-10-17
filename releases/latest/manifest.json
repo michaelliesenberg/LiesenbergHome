@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.38.2",
- "file": "hub-2.38.2.tar.gz",
- "sha256": "63048598b03d830d487b77d28b89fc2e7ceb86c074933f23422d0677d404be08",
+ "version": "2.39.0",
+ "file": "hub-2.39.0.tar.gz",
+ "sha256": "1549063cdbc9da4c849b5b0854d1bd6ef4c084bd5af53e5b63bff442b4ae1f90",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger-Ablauf: jeder mit Tor-Recht darf ihn einrichten",
- "created": 1792135505
+ "notes": "Fu\u00dfg\u00e4nger: Laufzustand f\u00fcr die Live-Ansicht in der App (Schritt, Zeiten)",
+ "created": 1792224288
 }

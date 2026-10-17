@@ -88,7 +88,10 @@ class Pedestrian:
             raise RuntimeError("Fußgänger-Ablauf läuft schon")
         self._cancel.clear()
         total = sum(s.get("wait", 0) for s in cfg["steps"])
-        self.state = {"running": True, "step": 0, "by": who, "started": time.time(), "total": total, "last": self.state.get("last")}
+        now = time.time()
+        # Laufzustand für die App-Animation: Schritte, aktueller Schritt und seit wann (Hub-Uhrzeit)
+        self.state = {"running": True, "run": int(now * 1000), "step": 0, "stepStarted": now, "by": who, "started": now,
+                      "total": total, "steps": cfg["steps"], "last": self.state.get("last")}
         threading.Thread(target=self._run, args=(cfg, who), daemon=True).start()
         return {"started": True, "seconds": total}
 
@@ -128,6 +131,7 @@ class Pedestrian:
         try:
             for i, s in enumerate(cfg["steps"]):
                 self.state["step"] = i
+                self.state["stepStarted"] = time.time()
                 if self._cancel.is_set():
                     result = "abgebrochen"
                     break
@@ -143,7 +147,8 @@ class Pedestrian:
                     while time.time() < end and not self._cancel.is_set():
                         self.sleep_fn(min(0.1, max(0.0, end - time.time())))
         finally:
-            self.state.update({"running": False, "step": None, "last": {"at": time.time(), "result": result, "by": who}})
+            self.state.update({"running": False, "step": None,
+                               "last": {"at": time.time(), "result": result, "by": who, "run": self.state.get("run")}})
             print(f"[TOR] Fußgänger ({who}): {result}", flush=True)
             if result != "ok" and self.notify_fn:
                 try:

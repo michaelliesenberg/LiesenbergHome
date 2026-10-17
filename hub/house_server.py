@@ -1075,6 +1075,13 @@ async def gate_ped_put(request: Request, p=Depends(person)):       # jeder, der 
     return {**cfg, "problem": pedestrian.problem(cfg)}
 
 
+@app.get("/api/gate/pedestrian/state")
+def gate_ped_state(p=Depends(person)):
+    """Nur der Laufzustand (für die Animation in der App, wird während des Ablaufs oft abgefragt)."""
+    _need_gate(p)
+    return {**pedestrian.state, "now": time.time()}
+
+
 @app.post("/api/gate/pedestrian/run")
 def gate_ped_run(p=Depends(person)):
     _need_gate(p)
