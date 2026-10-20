@@ -17,6 +17,14 @@ Michael Liesenberg, Deutschland – Kontakt über die [Issues-Seite des Projekts
 - **Apple Music:** Wiedergabe über Apples MusicKit auf deinem Gerät, nach deiner Zustimmung.
 - **Siri / Kurzbefehle:** Geräte- und Szenennamen werden iOS bekannt gemacht, damit Sprachbefehle funktionieren.
 
+## Android-App
+Für die Android-App gilt dasselbe, mit diesen Unterschieden:
+- **Schlüssel:** verschlüsselt im Android-Keystore statt im iOS-Schlüsselbund.
+- **Hub-Suche:** die App sucht den Hub im eigenen WLAN (mDNS); dabei verlässt nichts dein Netzwerk.
+- **Kamera:** nur zum Scannen des Einladungs-QR-Codes; es werden keine Bilder gespeichert oder übertragen.
+- **Fingerabdruck / PIN:** wird von Android geprüft; die App erhält nur „entsperrt ja/nein".
+- **Kein Standort, keine Mitteilungen, kein Siri/Apple Music** – diese Funktionen gibt es in der Android-App nicht.
+
 ## Was die App NICHT tut
 - keine Übertragung an Server des Entwicklers (es gibt keine),
 - keine Analyse- oder Tracking-Werkzeuge, keine Werbung,
@@ -26,4 +34,4 @@ Michael Liesenberg, Deutschland – Kontakt über die [Issues-Seite des Projekts
 Der Hub läuft auf deiner Hardware unter deiner Kontrolle. Er speichert seine Einstellungen und Zugangsdaten lokal. Je nach Einrichtung verbindet er sich mit Diensten, die **du** auswählst (z. B. Daikin Onecta, Bosch/Siemens Home Connect, Tailscale); dafür gelten die Datenschutzbestimmungen dieser Anbieter.
 
 ## Löschen
-App löschen entfernt alle Daten auf dem iPhone. Der Besitzer des Hubs kann deinen Zugang jederzeit entfernen; dein Schlüssel ist danach wertlos.
+App löschen entfernt alle Daten auf dem iPhone bzw. Android-Gerät. Der Besitzer des Hubs kann deinen Zugang jederzeit entfernen; dein Schlüssel ist danach wertlos.
