@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.39.0",
- "file": "hub-2.39.0.tar.gz",
- "sha256": "1549063cdbc9da4c849b5b0854d1bd6ef4c084bd5af53e5b63bff442b4ae1f90",
+ "version": "2.40.0",
+ "file": "hub-2.40.0.tar.gz",
+ "sha256": "9b69f5a6a95b2c649232a2913611f163bb4d2fab7f33e9ccebfd13c3625e173e",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -45,6 +45,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Fu\u00dfg\u00e4nger: Laufzustand f\u00fcr die Live-Ansicht in der App (Schritt, Zeiten)",
- "created": 1792224288
+ "notes": "Panik-Modus: Hub erkennt LUXOR-Panik (IP1-Datenpunkt \u201ePanik\u201c), App zeigt roten Balken mit Beenden; w\u00e4hrend Panik kein Fu\u00dfg\u00e4nger-Ablauf",
+ "created": 1792829353
 }

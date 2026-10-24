@@ -1013,11 +1013,109 @@ def scenes_run(sid: str, phase: str = "start", p=Depends(person)):
         raise HTTPException(status_code=404, detail="Szene nicht gefunden")
 
 
+# ---------------------------------------------------------------- Panik (LUXOR)
+# Panik am Taster (KNX 5/1/248 → IP1-Datenpunkt 15 „Panik“) schaltet alle Panik-Ausgänge fest ein – normale Aus-Befehle
+# wirken dann nicht, und „Pedestrien“ geht mit an (23.10.: dadurch Fußgänger-Ablauf → Tor auf). Der Hub liest den
+# Datenpunkt alle paar Sekunden, zeigt ihn in der App, beendet Panik auf Wunsch (Datenpunkt „aus“, wie die LUXOR-App)
+# und startet währenddessen keinen Fußgänger-Ablauf.
+PANIC_DP = 15
+_panic = {"active": False, "since": None, "known": False, "dp": None}
+
+
+def _panic_dp():
+    """Datenpunkt-Nummer – nur, wenn das IP1 ihn wirklich „Panik“ nennt (andere Anlagen: kein Panik-Modus)."""
+    if hub_config.get("backend") != "luxor":
+        return None
+    want = int(hub_config.get("luxor.panic_dp", PANIC_DP))
+    if _panic.get("checked") != (luxor.host, want):
+        try:
+            code, text = luxor.raw_get(f"/rest/datapoints/{want}")
+            name = json.loads(text).get("description", {}).get("name", "") if code == 200 else ""
+        except Exception:
+            return None                      # IP1 nicht erreichbar → später nochmal prüfen
+        _panic["checked"] = (luxor.host, want)
+        _panic["dp"] = want if ("panik" in name.lower() or "panic" in name.lower()) else None
+        print(f"[PANIK] Datenpunkt {want} „{name}“ → " + ("wird überwacht" if _panic["dp"] else "kein Panik-Modus"), flush=True)
+    return _panic["dp"]
+
+
+def _panic_set(on, who=None):
+    _panic["known"] = True
+    if on == _panic["active"]:
+        return
+    _panic.update(active=on, since=time.time() if on else None)
+    if on:
+        print("[PANIK] aktiv – Panik-Ausgänge fest an, Fußgänger-Ablauf gesperrt", flush=True)
+        if globals().get("push"):                  # Mitteilung an alle iPhones (push wird weiter unten angelegt)
+            push.send("panic", "Panik-Modus aktiv", "Lichter und Markisen bleiben an, Aus-Befehle wirken nicht. Beenden in der App.")
+    else:
+        print("[PANIK] beendet" + (f" von {who}" if who else " (am IP1/in der LUXOR-App)"), flush=True)
+
+
+def panic_read():
+    """Panik jetzt am IP1 lesen → True/False, None = unbekannt (kein LUXOR, nicht erreichbar)."""
+    dp = _panic_dp()
+    if dp is None:
+        return None
+    try:
+        v = luxor.get(dp)
+    except Exception:
+        v = None
+    if v is None:
+        return None
+    _panic_set(bool(v))
+    return bool(v)
+
+
+def _panic_block():
+    return "Panik-Modus aktiv – Fußgänger-Ablauf gesperrt" if panic_read() else None
+
+
+def _panic_loop():
+    time.sleep(5)                                  # erst, wenn der Hub fertig gestartet ist
+    while True:
+        try:
+            panic_read()
+        except Exception as e:
+            print(f"[PANIK] Lesen fehlgeschlagen: {e}", flush=True)
+        time.sleep(3)
+
+
+threading.Thread(target=_panic_loop, daemon=True).start()
+
+
+def _panic_info(p):
+    return {"active": _panic["active"], "since": _panic["since"], "known": _panic["known"],
+            "available": _panic["dp"] is not None, "canEnd": p["role"] in ("owner", "full")}
+
+
+@app.get("/api/panic")
+def panic_get(p=Depends(person)):
+    return _panic_info(p)
+
+
+@app.post("/api/panic/end")
+def panic_end(p=Depends(can_edit)):
+    dp = _panic_dp()
+    if dp is None:
+        raise HTTPException(status_code=404, detail="Kein Panik-Modus (nur bei LUXORliving)")
+    print(f"[PANIK] {p['name']}: Panik beenden", flush=True)
+    if not luxor.set(dp, False):
+        raise HTTPException(status_code=502, detail="IP1 hat das Beenden nicht angenommen")
+    time.sleep(0.5)
+    if luxor.get(dp) is False:
+        _panic_set(False, p["name"])
+    else:
+        print("[PANIK] nach dem Beenden noch aktiv?", flush=True)
+    return _panic_info(p)
+
+
 # ---------------------------------------------------------------- Tor: Fußgänger-Modus
 import gate_ped as _gate_ped  # noqa: E402
 
 pedestrian = _gate_ped.Pedestrian(lambda did, cmd: need_home().command(did, cmd),
-                                  lambda title, body: push.send("weekly", title, body))
+                                  lambda title, body: push.send("weekly", title, body),
+                                  blocked_fn=_panic_block)
 
 
 def _gate_devices():

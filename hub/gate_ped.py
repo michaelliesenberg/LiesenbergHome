@@ -9,6 +9,7 @@ Die Abfolge steht in gate-pedestrian.json und ist einstellbar (Besitzer), z. B.:
 Schutz:
   • Es läuft immer nur eine Abfolge; währenddessen lehnt der Hub andere Tor-Befehle ab (busy()).
   • Schlägt ein Impuls fehl, wird abgebrochen (keine weiteren Impulse) und eine Mitteilung geschickt.
+  • Während Panik (LUXOR) startet nichts – Panik schaltet „Pedestrien“ mit ein (23.10.: Tor ging dadurch auf).
   • „Abbrechen“ beendet nur das Warten – es wird kein zusätzlicher Impuls gesendet (was ein Impuls bewirkt,
     hängt von der Torstellung ab; das soll der Mensch am Tor entscheiden).
 """
@@ -44,8 +45,9 @@ def clean(cfg):
 
 
 class Pedestrian:
-    def __init__(self, command_fn, notify_fn=None, sleep_fn=time.sleep):
+    def __init__(self, command_fn, notify_fn=None, sleep_fn=time.sleep, blocked_fn=None):
         self.command_fn, self.notify_fn, self.sleep_fn = command_fn, notify_fn, sleep_fn
+        self.blocked_fn = blocked_fn          # → Grund, warum gerade gar nichts starten darf (z. B. Panik), oder None
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self.state = {"running": False, "step": None, "last": None}
@@ -70,6 +72,9 @@ class Pedestrian:
     def problem(self, cfg=None):
         """Warum (noch) nicht startbar – oder None."""
         cfg = cfg or self.load()
+        blocked = self.blocked_fn() if self.blocked_fn else None
+        if blocked:
+            return blocked
         if not cfg["confirmed"]:
             return "Fußgänger-Ablauf noch nicht bestätigt (Einstellungen → Tor)"
         if not cfg["steps"]:
@@ -112,6 +117,7 @@ class Pedestrian:
                     if trig:
                         on = read_fn(trig)
                         if on is True and prev is False:
+                            self.sleep_fn(1)          # Panik schaltet „Pedestrien“ mit ein – Panik-Meldung abwarten
                             if self.busy():
                                 print("[TOR] Fußgänger-Taster: Ablauf läuft schon – ignoriert", flush=True)
                             elif self.problem():
