@@ -73,6 +73,7 @@ class Scenes:
         self.scenes = self._load()
         self.last_run = {}              # id → {"phase", "at", "ok", "errors"}
         self._fired = set()
+        self.central = None             # CentralOffSchedule – läuft im selben Zeitplan-Takt mit
         threading.Thread(target=self._scheduler, daemon=True).start()
 
     # ---- Speicher
@@ -195,8 +196,164 @@ class Scenes:
                         if t and t <= now < t + timedelta(minutes=2) and key not in self._fired:
                             self._fired.add(key)
                             threading.Thread(target=self.run, args=(s["id"], phase), daemon=True).start()
+                if self.central is not None:
+                    self.central.tick()
                 if len(self._fired) > 500:
                     self._fired = {k for k in self._fired if k[2] == today.isoformat()}
             except Exception as e:
                 print(f"[SZENE] Zeitplan-Fehler: {e}", flush=True)
             time.sleep(20)
+
+
+# ------------------------------------------------------------------ Zeitplan für „Zentral aus"
+CENTRAL_FILE = os.environ.get("CENTRAL_OFF_FILE", os.path.join(DATA_DIR, "central_off.json"))
+CENTRAL_LATE = 300                  # mehr als 5 Minuten zu spät (Hub war aus) → auslassen, nicht nachholen
+CENTRAL_KINDS = ("light", "dimmer")
+
+
+def lights_off(home, delay=0.3, sleep=time.sleep):
+    """Alle Lichter/Dimmer aus, die gerade an sind – einzeln, mit kurzer Pause dazwischen.
+    Tore, Türen, „Fußgänger“ (Typ gate, restricted, ped:…), Rollläden, Markisen und Heizung werden nie angefasst
+    (anders als der IP1-Datenpunkt „Zentral aus“, der in der .lxp auch an den Tor-Relais hängt)."""
+    from devices import apply_overrides, device_index
+    devs = [d for d in device_index(apply_overrides(home.structure())).values()
+            if d["kind"] in CENTRAL_KINDS and not d.get("restricted") and not d["id"].startswith("ped:")]
+    try:
+        st = home.states([d["id"] for d in devs])
+    except Exception:
+        st = None                   # Zustand unbekannt → allen „aus“ schicken (aus ist harmlos)
+    targets = [d for d in devs if st is None or st.get(d["id"], {}).get("on", True)]
+    done, errors = [], []
+    for i, d in enumerate(targets):
+        if i:
+            sleep(delay)
+        try:
+            home.command(d["id"], {"on": False})
+            done.append(d["name"])
+        except Exception as e:
+            errors.append(f"{d['name']}: {e}")
+    return done, errors
+
+
+class CentralOffSchedule:
+    """„Zentral aus“ automatisch – wie der Zeitplan einer Szene: Wochentage + Uhrzeit.
+    {"enabled": true, "days": [0..6], "time": "22:00", "push": false}  in DATA_DIR/central_off.json
+    Ortszeit des Pi (Europe/Berlin): fällt die Zeit in die Sommerzeit-Lücke, gilt die nächste gültige Minute;
+    doppelt vorkommende Zeit (Herbst) und Neustarts lösen nur einmal pro Tag aus („lastFired“ wird gespeichert)."""
+
+    def __init__(self, home_fn, push=None, guard_fn=None, busy_fn=None):
+        self.home_fn, self.push = home_fn, push
+        self.guard_fn = guard_fn        # → Grund zum Auslassen (z. B. Panik) oder None
+        self.busy_fn = busy_fn          # → True, solange der Fußgänger-Ablauf läuft (dann kurz warten)
+        self._lock = threading.Lock()
+        self.cfg = self._load()
+
+    def _load(self):
+        try:
+            with open(CENTRAL_FILE) as f:
+                c = json.load(f)
+        except (OSError, ValueError):
+            c = {}
+        return {"enabled": False, "days": list(range(7)), "time": "22:00", "push": False,
+                "lastFired": None, "lastRun": None, "log": [], **c}
+
+    def _save(self):
+        tmp = CENTRAL_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.cfg, f, indent=1, ensure_ascii=False)
+        os.replace(tmp, CENTRAL_FILE)
+
+    def get(self):
+        c = dict(self.cfg)
+        c.pop("lastFired", None)
+        n = self.next_due()
+        c["next"] = int(n) if n else None
+        return c
+
+    def update(self, body, by=""):
+        days = sorted({int(d) for d in (body.get("days") or []) if 0 <= int(d) <= 6})
+        hh, mm = (str(body.get("time") or "22:00").split(":") + ["0"])[:2]
+        hh, mm = max(0, min(23, int(hh))), max(0, min(59, int(mm)))
+        enabled = bool(body.get("enabled"))
+        if enabled and not days:
+            raise ValueError("Mindestens einen Wochentag wählen")
+        with self._lock:
+            self.cfg.update(enabled=enabled, days=days or list(range(7)), time=f"{hh:02d}:{mm:02d}",
+                            push=bool(body.get("push", False)))
+            # heute schon vorbei? Dann nicht sofort nachholen – erst ab dem nächsten Termin
+            now = time.time()
+            t = self._due(date.fromtimestamp(now))
+            self.cfg["lastFired"] = date.fromtimestamp(now).isoformat() if t <= now else None
+            self._save()
+        print(f"[ZENTRAL] {by}: Zeitplan {'an' if enabled else 'aus'} {self.cfg['time']} "
+              f"{','.join(str(d) for d in self.cfg['days'])}", flush=True)
+        return self.get()
+
+    # ---- Zeit
+    def _due(self, day):
+        hh, mm = map(int, self.cfg["time"].split(":"))
+        return time.mktime((day.year, day.month, day.day, hh, mm, 0, 0, 0, -1))
+
+    def next_due(self, now=None):
+        if not self.cfg.get("enabled"):
+            return None
+        now = now or time.time()
+        today = date.fromtimestamp(now)
+        for i in range(8):
+            day = today + timedelta(days=i)
+            t = self._due(day)
+            if day.weekday() in self.cfg["days"] and t > now and self.cfg.get("lastFired") != day.isoformat():
+                return t
+        return None
+
+    def tick(self, now=None):
+        """Vom Szenen-Zeitplan alle 20 s aufgerufen. → Datum, an dem ausgelöst wurde, oder None."""
+        if not self.cfg.get("enabled"):
+            return None
+        now = now or time.time()
+        for back in (0, 1):                     # 23:58 + Hub-Verzögerung → kann schon „morgen“ sein
+            day = date.fromtimestamp(now) - timedelta(days=back)
+            key = day.isoformat()
+            if day.weekday() not in self.cfg["days"] or self.cfg.get("lastFired") == key:
+                continue
+            t = self._due(day)
+            if t <= now < t + CENTRAL_LATE:
+                with self._lock:
+                    self.cfg["lastFired"] = key
+                    self._save()
+                threading.Thread(target=self.run, args=("Zeitplan",), daemon=True).start()
+                return key
+        return None
+
+    # ---- Ausführen
+    def run(self, source="Zeitplan", sleep=time.sleep):
+        errors, done = [], []
+        reason = self.guard_fn() if self.guard_fn else None
+        if reason:
+            errors.append(reason)
+        else:
+            for _ in range(24):                 # Fußgänger-Ablauf läuft → bis zu 2 Minuten warten
+                if not (self.busy_fn and self.busy_fn()):
+                    break
+                sleep(5)
+            home = self.home_fn()
+            if home is None:
+                errors.append("Kein Haus eingerichtet")
+            else:
+                try:
+                    done, errors = lights_off(home, sleep=sleep)
+                except Exception as e:
+                    errors.append(f"Geräte nicht erreichbar: {e}")
+        at = datetime.now().strftime("%d.%m. %H:%M")
+        r = {"at": at, "source": source, "count": len(done), "ok": not errors, "errors": errors[:5]}
+        with self._lock:
+            self.cfg["lastRun"] = r
+            self.cfg["log"] = ([r] + self.cfg.get("log", []))[:10]
+            self._save()
+        print(f"[ZENTRAL] {source}: {len(done)} Gerät(e) aus{' – ' + '; '.join(errors[:3]) if errors else ''}", flush=True)
+        if self.cfg.get("push") and self.push is not None:
+            text = reason or (f"{len(done)} Gerät{'' if len(done) == 1 else 'e'} ausgeschaltet" if done else "Alles war schon aus")
+            if errors and not reason:
+                text += f" · {len(errors)} Fehler"
+            self.push.send("central", f"Zentral-Aus {self.cfg['time']}", text)
+        return r

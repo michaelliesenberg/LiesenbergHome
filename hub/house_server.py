@@ -2083,6 +2083,36 @@ import vacation as _vacation  # noqa: E402
 vacation = _vacation.Vacation(home, lambda d: _scenes._sun_time(d, rising=False), push)
 
 
+# ---------------------------------------------------------------- Zentral aus: Zeitplan (wie bei Szenen)
+central_schedule = _scenes.CentralOffSchedule(
+    home, push,
+    guard_fn=lambda: "Panik-Modus aktiv – Aus-Befehle wirken nicht" if panic_read() else None,
+    busy_fn=lambda: pedestrian.busy())
+scenes.central = central_schedule
+
+
+@app.get("/api/home/central-off/schedule")
+def central_schedule_get(p=Depends(person)):
+    return central_schedule.get()
+
+
+@app.put("/api/home/central-off/schedule")
+async def central_schedule_put(request: Request, p=Depends(can_edit)):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Ungültiger Zeitplan")
+    try:
+        return central_schedule.update(body, p["name"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/home/central-off/schedule/test")
+def central_schedule_test(p=Depends(can_edit)):
+    """Genau das, was der Zeitplan macht (nur Lichter/Dimmer, die an sind) – jetzt sofort."""
+    return central_schedule.run(f"Test ({p['name']})")
+
+
 @app.get("/api/vacation")
 def vacation_get(p=Depends(person)):
     return vacation.status()
