@@ -13,6 +13,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"target"|"trigger"}
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
+  GET /api/heating/night · PUT /api/heating/night/{id} – Nachtabsenkung je Raum (Besitzer + Vollzugriff)
   GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= · /api/energy/plan · GET/POST/DELETE /api/smartstart (Geräte automatisch starten) ·
   GET/PUT /api/prices (Strompreise) und /api/energy/summary: Besitzer + Vollzugriff, nicht Gäste · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
@@ -2113,6 +2114,33 @@ def central_schedule_test(p=Depends(can_edit)):
     return central_schedule.run(f"Test ({p['name']})")
 
 
+# ---------------------------------------------------------------- Nachtabsenkung je Raum (Heizung)
+import nightheat as _nightheat  # noqa: E402
+
+nightheat = _nightheat.NightHeat(home, structure, push, evcc_fn=_evcc_state_safe,
+                                 sunset_fn=lambda d: _scenes._sun_time(d, rising=False))
+
+
+@app.get("/api/heating/night")
+def nightheat_get(p=Depends(person)):
+    return nightheat.get()
+
+
+@app.put("/api/heating/night/{fid:path}")
+async def nightheat_put(fid: str, request: Request, p=Depends(person)):
+    if not PERMS[p["role"]]["climate"]:
+        raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Ungültige Einstellung")
+    try:
+        return nightheat.update(fid, body, p["name"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Heizung unbekannt")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/vacation")
 def vacation_get(p=Depends(person)):
     return vacation.status()
@@ -2193,6 +2221,7 @@ def pico_file(path: str, request: Request):
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
+                           "nightheat": nightheat,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 
