@@ -608,7 +608,53 @@ def attach(app, ctx):
         if c["client_id"] and redirect:
             login = f'<a class=btn href="/setup/daikin/login">Mit Daikin anmelden</a> ' + (
                 '<span class=ok>✓ angemeldet</span>' if CTX["daikin"].auth.ready else "")
-        return _page("Klima", _flash(tok) + f'<div class=card><h2>Daikin (Onecta)</h2>{steps}{form}{login}</div>', "klima", csrf)
+        return _page("Klima", _flash(tok) + _heatplan(csrf) + f'<div class=card><h2>Daikin (Onecta)</h2>{steps}{form}{login}</div>', "klima", csrf)
+
+    def _heatplan(csrf):
+        """Heizplan je Raum: Nachtabsenkung + Sonnen-Extra (siehe nightheat.py)."""
+        nh = CTX.get("nightheat")
+        rooms = nh.get()["rooms"] if nh else []
+        if not rooms:
+            return ""
+        chk = lambda n, on, label: (f'<label style="display:flex;gap:6px;align-items:center"><input style="width:auto" '
+                                    f'type=checkbox name={n} value=1 {"checked" if on else ""}>{E(label)}</label>')
+        days = "MoDiMiDoFrSaSo"
+        out = []
+        for r in rooms:
+            sc = r["sun"]
+            dsel = "".join(f'<label style="display:inline-flex;gap:4px;margin-right:8px"><input style="width:auto" type=checkbox '
+                           f'name=d{i} value=1 {"checked" if i in r["days"] else ""}>{days[2 * i:2 * i + 2]}</label>' for i in range(7))
+            state = (' <span class=pill>gerade abgesenkt</span>' if r["active"] else "") + (
+                ' <span class=pill>Sonnen-Extra läuft</span>' if sc.get("active") else "")
+            inner = (f'<input type=hidden name=id value="{E(r["id"])}">' + chk("on", r["enabled"], "Nachts absenken")
+                     + '<div class=row><div>' + _field("start", "Ab", r["start"], "time") + '</div><div>'
+                     + _field("end", "Bis", r["end"], "time") + '</div><div>'
+                     + _field("night", "Nacht-Soll (°C)", r["night"], "text") + '</div></div>'
+                     + f'<label>Abende</label>{dsel}'
+                     + chk("sun", sc["enabled"], "Sonnen-Extra vor Sonnenuntergang")
+                     + '<div class=row><div>' + _field("plus", "Plus (°C)", sc["plus"], "text") + '</div><div>'
+                     + _field("before", "Minuten vor Sonnenuntergang", sc["before"], "number") + '</div></div>'
+                     + '<div class=row><div>' + _field("surplus", "Mindestens übrig (W)", sc["surplus"], "number") + '</div><div>'
+                     + _field("soc", "Akku mindestens (%)", sc["soc"], "number") + '</div></div>')
+            out.append(f'<h3 style="margin:16px 0 0">{E(r["room"])} · {E(r["name"])}{state}</h3>'
+                       + _form("/setup/save/heatplan", inner, csrf))
+        return ('<div class=card><h2>Heizplan je Raum</h2><p class=muted>Nachts Soll-Temperatur runter, morgens zurück auf den '
+                'Wert von vorher. Sonnen-Extra: kurz vor Sonnenuntergang ein paar Grad mehr, solange Sonnenstrom übrig ist.</p>'
+                + "".join(out) + '</div>')
+
+    @app.post("/setup/save/heatplan")
+    async def save_heatplan(request: Request):
+        f = {k: str(v).replace(",", ".").strip() for k, v in (await request.form()).items()}
+        try:
+            CTX["nightheat"].update(f.get("id") or "", {
+                "enabled": bool(f.get("on")), "days": [i for i in range(7) if f.get(f"d{i}")],
+                "start": f.get("start"), "end": f.get("end"), "night": float(f.get("night") or 17),
+                "sun": {"enabled": bool(f.get("sun")), "plus": float(f.get("plus") or 1.5),
+                        "before": int(float(f.get("before") or 120)), "surplus": int(float(f.get("surplus") or 1500)),
+                        "soc": int(float(f.get("soc") or 80))}}, "Einrichtung")
+        except (KeyError, ValueError, TypeError) as e:
+            return _done(request.state.tok, "klima", False, f"Nicht gespeichert: {e}")
+        return _done(request.state.tok, "klima")
 
     @app.post("/setup/save/daikin")
     async def save_daikin(request: Request):

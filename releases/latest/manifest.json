@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.41.0",
- "file": "hub-2.41.0.tar.gz",
- "sha256": "b874c77c5a07f3bc62c81d0346be1115a9d465d37356e618ca2776ae9a21aa87",
+ "version": "2.42.0",
+ "file": "hub-2.42.0.tar.gz",
+ "sha256": "6c909d9abd1d2e61356f7af316aa1525374629b1d102d464c4a575e9dd9a1487",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -29,6 +29,7 @@
   "miele.py",
   "mower.py",
   "music.py",
+  "nightheat.py",
   "notifier.py",
   "people.py",
   "planner.py",
@@ -45,6 +46,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Zentral aus mit Zeitplan (Wochentage + Uhrzeit, wie bei Szenen): schaltet nur Lichter/Dimmer aus, die an sind \u2013 nie Tore, Fu\u00dfg\u00e4nger, Rolll\u00e4den, Heizung; optional Mitteilung",
- "created": 1793076527
+ "notes": "Heizplan je Raum: Nachtabsenkung und Sonnen-Extra",
+ "created": 1793215698
 }
