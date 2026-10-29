@@ -4,6 +4,7 @@ Rollen:
   owner – alles, inkl. Personen und Einrichtung
   full  – alle Geräte und Szenen bearbeiten, keine Personen/Einrichtung
   guest – Licht, Rollläden, Musik, Szenen starten; KEINE Tore/Türen, keine Heizung/Klima, nichts bearbeiten
+          (Einzelrechte „Tor bedienen“ und „Heizung einstellen“ lassen sich je Person freischalten)
 
 Auf dem Hub werden nur Hashes der Schlüssel gespeichert. Eine Einladung ist ein
 Einmal-Code (48 h gültig), den die App gegen den eigentlichen Schlüssel tauscht –
@@ -53,6 +54,7 @@ def _save(d):
 def _public(p):
     q = {k: p.get(k) for k in ("id", "name", "role", "created", "last_seen")}
     q["gate"] = bool(p.get("gate"))          # „Tor bedienen“ auch ohne Vollzugriff (z. B. Haushaltshilfe)
+    q["climate"] = bool(p.get("climate"))    # „Heizung einstellen“ auch ohne Vollzugriff
     return q
 
 
@@ -160,6 +162,20 @@ def set_gate(pid: str, allowed: bool):
         for p in d["people"]:
             if p["id"] == pid:
                 p["gate"] = bool(allowed)
+                found = True
+        if not found:
+            raise ValueError("Person unbekannt")
+        _save(d)
+
+
+def set_climate(pid: str, allowed: bool):
+    """Einzelrecht „Heizung einstellen“ (Raum-Soll, Heizplan, Daikin) – unabhängig von der Rolle."""
+    with _lock:
+        d = _load()
+        found = False
+        for p in d["people"]:
+            if p["id"] == pid:
+                p["climate"] = bool(allowed)
                 found = True
         if not found:
             raise ValueError("Person unbekannt")
