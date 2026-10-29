@@ -244,7 +244,14 @@ def _wrap_pedestrian(obj):
 
     def command(did, cmd):
         if did != PED_ID:
-            return orig_cmd(did, cmd)
+            res = orig_cmd(did, cmd)
+            ped = globals().get("pedestrian")
+            if ped is not None and cmd.get("trigger"):
+                try:
+                    ped.observe_command(did)          # Torstellung schätzen (gate_ped.GateModel)
+                except Exception as e:
+                    print(f"[TOR] Schätzung: {e}", flush=True)
+            return res
         if not cmd.get("trigger") and not cmd.get("on"):
             return None                               # „aus“ (z. B. Szenen-Stopp) → nichts tun
         try:
@@ -1179,7 +1186,8 @@ def gate_ped_get(p=Depends(person)):
                 cfg["devices"]["open"] = g["id"]
             elif "außen" in n and "schließen" in n:
                 cfg["devices"]["step"] = g["id"]
-    return {**cfg, "gates": gates, "problem": pedestrian.problem(cfg), "state": pedestrian.state}
+    return {**cfg, "gates": gates, "problem": pedestrian.problem(cfg), "state": pedestrian.state,
+            "position": pedestrian.model.estimate()}
 
 
 @app.put("/api/gate/pedestrian")
@@ -1194,7 +1202,7 @@ async def gate_ped_put(request: Request, p=Depends(person)):       # jeder, der 
 def gate_ped_state(p=Depends(person)):
     """Nur der Laufzustand (für die Animation in der App, wird während des Ablaufs oft abgefragt)."""
     _need_gate(p)
-    return {**pedestrian.state, "now": time.time()}
+    return {**pedestrian.state, "now": time.time(), "position": pedestrian.model.estimate()}
 
 
 @app.post("/api/gate/pedestrian/run")

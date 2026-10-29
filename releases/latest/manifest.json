@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.43.0",
- "file": "hub-2.43.0.tar.gz",
- "sha256": "0f1304994874484a1054f07849b62cef8d8cd924adc6d2673acfd27998261184",
+ "version": "2.44.0",
+ "file": "hub-2.44.0.tar.gz",
+ "sha256": "b1670abea481f763a68df3bac6acc8feebcc421d0951070a255b208df4268aa2",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -46,6 +46,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Einzelrecht \u201eHeizung einstellen\u201c je Person",
- "created": 1793255047
+ "notes": "Tor-Fu\u00dfg\u00e4nger: Hub sch\u00e4tzt die Torstellung aus Impulsen und Fahrzeit (40 s). Tor ganz offen \u2192 f\u00e4hrt direkt zu (vorher blieb es offen), Tor zu \u2192 nur Spalt \u00f6ffnen, Stellung unbekannt \u2192 erst ganz auf, dann zu, dann Spalt.",
+ "created": 1793273640
 }
