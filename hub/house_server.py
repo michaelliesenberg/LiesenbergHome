@@ -345,10 +345,12 @@ PERMS = {
 
 
 def perms(p):
-    """Rechte der Person: Rolle + Einzelrecht „Tor bedienen“ (Gäste dürfen dann Tore/Türen, sonst nichts mehr)."""
+    """Rechte der Person: Rolle + Einzelrechte „Tor bedienen“ (Tore/Türen) und „Heizung einstellen“ (Heizung/Klima)."""
     r = dict(PERMS[p["role"]])
     if p.get("gate"):
         r["restricted"] = True
+    if p.get("climate"):
+        r["climate"] = True
     return r
 
 
@@ -418,7 +420,7 @@ async def home_command(did: str, request: Request, p=Depends(person)):
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     if d.get("restricted") and pedestrian.busy():
         raise HTTPException(status_code=409, detail="Fußgänger-Ablauf läuft gerade – bitte warten")
-    if d["kind"] == "heating" and not PERMS[p["role"]]["climate"]:
+    if d["kind"] == "heating" and not perms(p)["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     try:
         need_home().command(did, cmd)
@@ -492,6 +494,20 @@ def people_gate(pid: str, body: GateChange, p=Depends(owner)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     print(f"[PERSONEN] {p['name']}: Tor bedienen für {pid} {'an' if body.gate else 'aus'}", flush=True)
+    return {"ok": True}
+
+
+class ClimateChange(BaseModel):
+    climate: bool
+
+
+@app.put("/api/people/{pid}/climate")
+def people_climate(pid: str, body: ClimateChange, p=Depends(owner)):
+    try:
+        people.set_climate(pid, body.climate)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    print(f"[PERSONEN] {p['name']}: Heizung einstellen für {pid} {'an' if body.climate else 'aus'}", flush=True)
     return {"ok": True}
 
 
@@ -754,7 +770,7 @@ class ClimateCommand(BaseModel):
 
 @app.put("/api/daikin/{unit_id}")
 def daikin_set(unit_id: str, cmd: ClimateCommand, p=Depends(person)):
-    if not PERMS[p["role"]]["climate"]:
+    if not perms(p)["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     try:
         return daikin.set(unit_id, on=cmd.on, mode=cmd.mode, target=cmd.target)
@@ -2128,7 +2144,7 @@ def nightheat_get(p=Depends(person)):
 
 @app.put("/api/heating/night/{fid:path}")
 async def nightheat_put(fid: str, request: Request, p=Depends(person)):
-    if not PERMS[p["role"]]["climate"]:
+    if not perms(p)["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
     body = await request.json()
     if not isinstance(body, dict):

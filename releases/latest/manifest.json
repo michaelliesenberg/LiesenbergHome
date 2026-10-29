@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.42.0",
- "file": "hub-2.42.0.tar.gz",
- "sha256": "6c909d9abd1d2e61356f7af316aa1525374629b1d102d464c4a575e9dd9a1487",
+ "version": "2.43.0",
+ "file": "hub-2.43.0.tar.gz",
+ "sha256": "0f1304994874484a1054f07849b62cef8d8cd924adc6d2673acfd27998261184",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -46,6 +46,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Heizplan je Raum: Nachtabsenkung und Sonnen-Extra",
- "created": 1793215698
+ "notes": "Einzelrecht \u201eHeizung einstellen\u201c je Person",
+ "created": 1793255047
 }
