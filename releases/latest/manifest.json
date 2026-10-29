@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.44.0",
- "file": "hub-2.44.0.tar.gz",
- "sha256": "b1670abea481f763a68df3bac6acc8feebcc421d0951070a255b208df4268aa2",
+ "version": "2.45.0",
+ "file": "hub-2.45.0.tar.gz",
+ "sha256": "2e2881b49c7c8d9d2236243ba18cbdd440cf19a36bde4f927d15d778bbda15f2",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -46,6 +46,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Tor-Fu\u00dfg\u00e4nger: Hub sch\u00e4tzt die Torstellung aus Impulsen und Fahrzeit (40 s). Tor ganz offen \u2192 f\u00e4hrt direkt zu (vorher blieb es offen), Tor zu \u2192 nur Spalt \u00f6ffnen, Stellung unbekannt \u2192 erst ganz auf, dann zu, dann Spalt.",
- "created": 1793273640
+ "notes": "Jalousien: Position in % setzen, Pfeile fahren nur ein St\u00fcck (step up/down)",
+ "created": 1793290709
 }

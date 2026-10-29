@@ -15,6 +15,7 @@ kind:
 
 Befehle (POST /api/home/device/{id}):
   {"on": true} · {"level": 40} · {"position": 100} · {"move": "up"|"down"|"stop"} ·
+  {"step": "up"|"down"} (Jalousie ein Stück, Hub rechnet daraus „position") ·
   {"target": 21.5} · {"trigger": true}
 """
 import copy

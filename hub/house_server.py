@@ -10,7 +10,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET  /api/me                     – wer bin ich, was darf ich, wie heißt das Zuhause
   GET  /api/home                   – Etagen → Räume → Geräte
   GET  /api/home/state?ids=a,b     – Zustand von Geräten
-  POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"target"|"trigger"}
+  POST /api/home/device/{id}       – Gerät schalten  {"on"|"level"|"position"|"move"|"step"|"target"|"trigger"}
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
   GET /api/heating/night · PUT /api/heating/night/{id} – Nachtabsenkung je Raum (Besitzer + Vollzugriff)
@@ -429,8 +429,17 @@ async def home_command(did: str, request: Request, p=Depends(person)):
         raise HTTPException(status_code=409, detail="Fußgänger-Ablauf läuft gerade – bitte warten")
     if d["kind"] == "heating" and not perms(p)["climate"]:
         raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
+    extra = {}
     try:
+        if d["kind"] == "blind" and cmd.get("step") in ("up", "down"):
+            cmd = {"position": _blind_step(did, cmd["step"])}
+            extra = cmd
         need_home().command(did, cmd)
+        if d["kind"] == "blind":
+            if cmd.get("position") is not None:
+                _blind_last[did] = (float(cmd["position"]), time.time())
+            else:
+                _blind_last.pop(did, None)             # Auf/Ab/Stopp: Position wieder vom IP1 lesen
     except KeyError:
         raise HTTPException(status_code=404, detail="Gerät unbekannt")
     except ValueError as e:
@@ -438,7 +447,26 @@ async def home_command(did: str, request: Request, p=Depends(person)):
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
     print(f"[HAUS] {p['name']}: {d['name']} {cmd}", flush=True)
-    return {"ok": True}
+    return {"ok": True, **extra}
+
+
+# Jalousie-Pfeile: ein Tipp fährt nur ein Stück (wie ein kurzer Tastendruck), ganz auf/zu geht über die Position.
+# Das IP1 meldet die Ist-Position erst nach der Fahrt – schnelle Folgetipps rechnen vom letzten Ziel weiter.
+_blind_last = {}
+
+
+def _blind_step(did, direction):
+    step = float(hub_config.get("blind.step_percent", 5))
+    last = _blind_last.get(did)
+    if last and time.time() - last[1] < 15:
+        pos = last[0]
+    else:
+        pos = (need_home().states([did]).get(did) or {}).get("position")
+        if pos is None:
+            raise ValueError("Position der Jalousie unbekannt")
+    new = max(0.0, min(100.0, float(pos) + (step if direction == "down" else -step)))
+    _blind_last[did] = (new, time.time())
+    return round(new)
 
 
 @app.post("/api/home/central-off")
