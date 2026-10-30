@@ -22,6 +22,8 @@ import copy
 import json
 import os
 import re
+import threading
+import time
 
 import lxp
 from hub_config import DATA_DIR
@@ -77,6 +79,14 @@ class LuxorBackend:
     def __init__(self, luxor):
         self.luxor = luxor          # Verbindung zum IP1 (lesen/schreiben, nacheinander)
         self._cache = {"mtime": None, "project": None}
+        # Das IP1 liest jeden Datenpunkt einzeln (~0,1–0,2 s). Die Räume-Übersicht fragt >100 auf einmal ab –
+        # ohne Grenze dauert das länger als die App wartet, und sie zeigt gar nichts „an".
+        self._vals = {}             # Datenpunkt → (Wert, Zeit)
+        self._filling = threading.Lock()
+
+    STATE_FRESH = 2.0               # s – so alte Werte gelten als aktuell
+    STATE_BUDGET = 12.0             # s – danach letzte bekannte Werte, der Rest wird im Hintergrund nachgelesen
+    STATE_OVERVIEW = 120.0          # s – große Abfragen (Übersicht) nehmen so alte Werte sofort und lesen im Hintergrund nach
 
     # ---- Struktur
     def project(self):
@@ -115,7 +125,10 @@ class LuxorBackend:
         if f.get("pulse"):
             return {}
         if k == "dimmer":
-            return {"level": dp.get("Status%") or dp.get("Dimmen%"), "on": dp.get("StatusOnOff")}
+            level = dp.get("Status%") or dp.get("Dimmen%")
+            if level:
+                return {"level": level}             # „an" ergibt sich aus der Helligkeit – spart einen Lesezugriff
+            return {"on": dp.get("StatusOnOff")}
         if k == "light":
             return {"on": dp.get("StatusOnOff") or dp.get("SchaltenOnOff") or dp.get("OnOff")}
         if k == "blind":
@@ -124,8 +137,31 @@ class LuxorBackend:
             return {"current": dp.get("Istwert"), "target": dp.get("StatusSollwert") or dp.get("Sollwert")}
         return {}
 
+    def _read(self, dpid):
+        v = self.luxor.get(lxp_rest(dpid))
+        if v is not None:
+            self._vals[dpid] = (v, time.time())
+        return v
+
+    def _fill(self, dps):
+        """Was in der Zeitgrenze nicht drankam, im Hintergrund lesen – die nächste Abfrage hat es dann sofort."""
+        if not self._filling.acquire(blocking=False):
+            return
+        def run():
+            try:
+                for dpid in dps:
+                    hit = self._vals.get(dpid)
+                    if not hit or time.time() - hit[1] > self.STATE_FRESH:
+                        self._read(dpid)
+            finally:
+                self._filling.release()
+        threading.Thread(target=run, daemon=True).start()
+
     def states(self, ids):
         funcs = self._functions()
+        deadline = time.time() + self.STATE_BUDGET
+        keep = self.STATE_OVERVIEW if len(ids) > 12 else self.STATE_FRESH
+        late = []
         out = {}
         for i in ids:
             f = funcs.get(i)
@@ -135,7 +171,19 @@ class LuxorBackend:
             for field, dpid in self._reads(f).items():
                 if dpid is None:
                     continue
-                v = self.luxor.get(lxp_rest(dpid))
+                hit = self._vals.get(dpid)
+                now = time.time()
+                if hit and now - hit[1] < keep:
+                    v = hit[0]
+                    if now - hit[1] >= self.STATE_FRESH:
+                        late.append(dpid)
+                elif now > deadline:
+                    late.append(dpid)
+                    v = hit[0] if hit else None
+                else:
+                    v = self._read(dpid)
+                    if v is None and hit:
+                        v = hit[0]
                 if v is None:
                     continue
                 if field == "on":
@@ -148,6 +196,8 @@ class LuxorBackend:
                 st["on"] = st["level"] > 0
             if st:
                 out[i] = st
+        if late:
+            self._fill(late)
         return out
 
     # ---- Schalten
@@ -192,6 +242,8 @@ class LuxorBackend:
         ws = self.writes(f, cmd)
         if not ws:
             raise ValueError("Befehl passt nicht zu diesem Gerät")
+        for dp in f["datapoints"].values():          # nach dem Schalten frisch lesen, nicht aus dem Zwischenspeicher
+            self._vals.pop(dp, None)
         for dpid, val in ws:
             if not self.luxor.set(lxp_rest(dpid), val):
                 raise RuntimeError(f"LUXORliving hat den Befehl abgelehnt ({self.luxor.last_write})")

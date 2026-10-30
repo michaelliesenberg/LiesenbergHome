@@ -33,6 +33,8 @@ MAX_STEPS = 12
 POS_FILE = os.path.join(DATA_DIR, "gate-position.json")
 TRAVEL = 40.0           # Sekunden für eine volle Fahrt (zu → ganz offen), Michael: „nach 40 s ist es offen“
 MARGIN = 5.0            # Sicherheitszuschlag beim Zufahren
+STALE = 600.0           # so lange gilt die Schätzung nach dem letzten Hub-Impuls; danach „Tor vermutlich zu“
+                        # (30.10.: über Nacht ohne Hub zugefahren – Selbstschließen/Handsender/Zentral aus)
 
 
 def _default():
@@ -53,8 +55,10 @@ def clean(cfg):
     trig = str(cfg.get("trigger") or "") or None          # Gerät, dessen Einschalten den Ablauf startet (z. B. „Pedestrien“)
     travel = cfg.get("travel")
     travel = round(max(5.0, min(MAX_WAIT, float(travel))), 1) if isinstance(travel, (int, float)) else TRAVEL
+    stale = cfg.get("stale")
+    stale = round(max(30.0, min(86400.0, float(stale))), 0) if isinstance(stale, (int, float)) else STALE
     return {"devices": devs, "steps": steps, "confirmed": bool(cfg.get("confirmed")), "trigger": trig,
-            "smart": cfg.get("smart") is not False, "travel": travel}
+            "smart": cfg.get("smart") is not False, "travel": travel, "stale": stale}
 
 
 def gap_seconds(steps):
@@ -76,12 +80,12 @@ class GateModel:
     def __init__(self, travel_fn=lambda: TRAVEL, path=POS_FILE, clock=time.time):
         self.travel_fn, self.path, self.clock = travel_fn, path, clock
         self._lock = threading.RLock()
-        self.s = {"pos0": None, "dir": None, "since": clock(), "last": None, "by": None}
+        self.s = {"pos0": None, "dir": None, "since": clock(), "last": None, "by": None, "seen": None}
         try:
             with open(path) as f:
                 d = json.load(f)
             if isinstance(d, dict) and "dir" in d:
-                self.s.update({k: d.get(k) for k in ("pos0", "dir", "since", "last", "by")})
+                self.s.update({k: d.get(k) for k in ("pos0", "dir", "since", "last", "by", "seen")})
         except (OSError, ValueError):
             pass
 
@@ -125,8 +129,9 @@ class GateModel:
                 el = now - s["since"]
                 left = max(0.0, T - el) if pos is None else (1 - pos if s["dir"] > 0 else pos) * T
             known = pos is not None and s["dir"] is not None
+            age = None if not s.get("seen") else round(max(0.0, now - s["seen"]), 1)   # seit letztem Hub-Impuls
             return {"pos": None if pos is None else round(pos, 3), "dir": s["dir"], "last": s["last"],
-                    "left": None if left is None else round(left, 1), "known": known, "by": s["by"]}
+                    "left": None if left is None else round(left, 1), "known": known, "by": s["by"], "age": age}
 
     def observe(self, role, by="", now=None):
         """Ein Impuls ist rausgegangen (Rolle open/step/close/stop)."""
@@ -167,6 +172,7 @@ class GateModel:
                 if new in (1, -1):
                     s["last"] = new
             s["by"] = by or s["by"]
+            s["seen"] = now
             self._save()
 
     def forget(self):
@@ -175,7 +181,7 @@ class GateModel:
             self._save()
 
 
-def plan(est, travel, gap):
+def plan(est, travel, gap, stale=STALE):
     """Fußgänger-Abfolge aus der geschätzten Torstellung → (Schritte, Begründung).
     Ziel immer: Tor zu, dann „gap“ Sekunden auf, Stopp."""
     T, M = travel, MARGIN
@@ -187,6 +193,12 @@ def plan(est, travel, gap):
 
     def close_from_open(extra=0.0):
         return [{"pulse": "step"}, w(T + M + extra)] + tail
+    # lange kein Hub-Impuls → das Tor kann sich ohne den Hub bewegt haben; meist ist es dann zu.
+    # Spalt öffnen: ist es doch offen, wirkt „öffnen“ nicht und der Stopp-Impuls fährt es ganz zu – nie offen stehen lassen.
+    age = est.get("age")
+    if d not in (1, -1) and (age is None or age > stale):
+        mins = "nie" if age is None else f"vor {age / 60:.0f} min"
+        return list(tail), f"letzter Torbefehl über den Hub {mins} → Tor vermutlich zu, Spalt öffnen"
     # fährt gerade auf (auch bei unbekannter Stellung) und ist bald oben → abwarten, dann direkt zu
     if d == 1 and left is not None and (left <= 6 or not est["known"]):
         return [w(left + 1)] + close_from_open(), f"Tor fährt auf, in {left:.0f} s offen → abwarten, dann zu"
@@ -224,7 +236,7 @@ class Pedestrian:
 
     def save(self, cfg):
         old = self.load()
-        for k in ("smart", "travel"):                 # ältere Apps kennen die Felder nicht → beim Speichern behalten
+        for k in ("smart", "travel", "stale"):                 # ältere Apps kennen die Felder nicht → beim Speichern behalten
             if isinstance(cfg, dict) and k not in cfg:
                 cfg[k] = old[k]
         cfg = clean(cfg)
@@ -274,7 +286,7 @@ class Pedestrian:
         why = "eingestellte Abfolge"
         if cfg["smart"]:
             est = self.model.estimate()
-            steps, why = plan(est, cfg["travel"], gap_seconds(cfg["steps"]))
+            steps, why = plan(est, cfg["travel"], gap_seconds(cfg["steps"]), cfg["stale"])
             cfg = {**cfg, "steps": steps}
             print(f"[TOR] Fußgänger: geschätzt {_fmt(est)} – {why}", flush=True)
         total = sum(s.get("wait", 0) for s in cfg["steps"])

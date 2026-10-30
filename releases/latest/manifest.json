@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.45.0",
- "file": "hub-2.45.0.tar.gz",
- "sha256": "2e2881b49c7c8d9d2236243ba18cbdd440cf19a36bde4f927d15d778bbda15f2",
+ "version": "2.45.2",
+ "file": "hub-2.45.2.tar.gz",
+ "sha256": "6436fa51e11a46d37bea476f6c994b276c5a1bc60b69e9a8a0e5c6a3bc1974c0",
  "files": [
   "VERSION",
   "caddy-https.sh",
@@ -46,6 +46,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Jalousien: Position in % setzen, Pfeile fahren nur ein St\u00fcck (step up/down)",
- "created": 1793290709
+ "notes": "R\u00e4ume-\u00dcbersicht zeigt wieder, was an ist (aus 2.45.1). Tor-Fu\u00dfg\u00e4nger: Ist der letzte Torbefehl \u00fcber den Hub l\u00e4nger als 10 min her, nimmt der Hub \u201eTor zu\u201c an und \u00f6ffnet nur den Spalt (3,5 s). Zentral aus macht die Torstellung unbekannt.",
+ "created": 1793342750
 }

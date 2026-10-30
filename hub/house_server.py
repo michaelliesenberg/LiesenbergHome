@@ -260,6 +260,17 @@ def _wrap_pedestrian(obj):
             raise RuntimeError(str(e))
     obj.structure, obj.command = structure, command
 
+    orig_off = obj.central_off
+
+    def central_off():
+        res = orig_off()
+        ped = globals().get("pedestrian")
+        if ped is not None:                           # LUXOR Zentral aus trifft auch die Tor-Ausgänge → Stellung unsicher
+            ped.model.forget()
+            print("[TOR] Zentral aus → Torstellung unbekannt", flush=True)
+        return res
+    obj.central_off = central_off
+
 
 def need_home():
     h = home()
