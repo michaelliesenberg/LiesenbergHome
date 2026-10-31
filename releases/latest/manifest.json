@@ -1,10 +1,11 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.45.2",
- "file": "hub-2.45.2.tar.gz",
- "sha256": "6436fa51e11a46d37bea476f6c994b276c5a1bc60b69e9a8a0e5c6a3bc1974c0",
+ "version": "2.47.1",
+ "file": "hub-2.47.1.tar.gz",
+ "sha256": "3dc009ee967dc986670d0c32d702a98ff20dea75252c45ad32cb57dd598afc40",
  "files": [
   "VERSION",
+  "appliance_learn.py",
   "caddy-https.sh",
   "consumers.py",
   "daikin.py",
@@ -33,6 +34,7 @@
   "notifier.py",
   "people.py",
   "planner.py",
+  "producers.py",
   "push.py",
   "report.py",
   "requirements.txt",
@@ -46,6 +48,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "R\u00e4ume-\u00dcbersicht zeigt wieder, was an ist (aus 2.45.1). Tor-Fu\u00dfg\u00e4nger: Ist der letzte Torbefehl \u00fcber den Hub l\u00e4nger als 10 min her, nimmt der Hub \u201eTor zu\u201c an und \u00f6ffnet nur den Spalt (3,5 s). Zentral aus macht die Torstellung unbekannt.",
- "created": 1793342750
+ "notes": "Behebt falsche Backofen-l\u00e4uft-Anzeigen (Live-Aktivit\u00e4t endet jetzt auf allen iPhones, kein zweites l\u00e4uft nach Neustart)",
+ "created": 1793448739
 }

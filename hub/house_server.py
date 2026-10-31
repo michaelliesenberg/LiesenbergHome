@@ -14,7 +14,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   POST /api/home/central-off       – alle Lichter aus
   GET/PUT/DELETE /api/scenes, POST /api/scenes/{id}/run
   GET /api/heating/night · PUT /api/heating/night/{id} – Nachtabsenkung je Raum (Besitzer + Vollzugriff)
-  GET  /api/energy · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= · /api/energy/plan · GET/POST/DELETE /api/smartstart (Geräte automatisch starten) ·
+  GET  /api/energy · /api/producers (Wechselrichter: Spitzen) · /api/energy/history?date= · /api/energy/days · /api/energy/summary?period=&date= · /api/energy/plan · GET/POST/DELETE /api/smartstart (Geräte automatisch starten) · PUT /api/smartstart/{id}/need (Mindest-Sonne) ·
   GET/PUT /api/prices (Strompreise) und /api/energy/summary: Besitzer + Vollzugriff, nicht Gäste · /api/daikin · /api/appliances · /api/music …
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
@@ -774,6 +774,20 @@ def smartstart_schedule(ha_id: str, body: SmartStartRequest, p=Depends(person)):
         return smartstart.schedule(ha_id, body.deadline, by=p["name"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class SmartNeed(BaseModel):
+    watts: int | None = None         # eigener Wert „so viel Sonne muss da sein“ (W); None = gelernt/Standard
+
+
+@app.put("/api/smartstart/{ha_id}/need")
+def smartstart_need(ha_id: str, body: SmartNeed, p=Depends(person)):
+    try:
+        dev = smartstart.set_need(ha_id, body.watts)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    print(f"[SMARTSTART] {p['name']}: Mindest-Sonne {ha_id} = {body.watts or 'automatisch'}", flush=True)
+    return dev or {"ok": True}
 
 
 @app.delete("/api/smartstart/{ha_id}")
@@ -1684,6 +1698,47 @@ def _light_states(ids):
 
 consumers.watch(_all_lights, _light_states)     # Schalten am Wandtaster (LUXOR/IP1/KNX) mitlernen
 
+import appliance_learn as _alearn  # noqa: E402
+
+
+def _learn_sources():
+    """Alles, dessen An/Aus der Hub sieht: Hausgeräte (Home Connect, Miele, LG), Wärmepumpe, Klimageräte."""
+    out, apps = [], []
+    try:
+        if homeconnect.auth.ready:
+            apps += list(homeconnect.list())
+    except Exception:
+        pass
+    for src in (globals().get("miele"), globals().get("lg")):
+        try:
+            if src is not None:
+                apps += src.list()
+        except Exception:
+            pass
+    for a in apps:
+        typ = _alearn.TYPES.get(a.get("type")) or _alearn.TYPES.get(a.get("typeText"))
+        if not typ or not a.get("connected", True):
+            continue
+        out.append({"id": a["id"], "name": _smartstart.label(a), "type": typ, "brand": a.get("brand"),
+                    "on": a.get("state") == "Run", "program": a.get("program"),
+                    "meterKWh": a.get("energyKWh") if a.get("brand") == "Miele" else None})
+    hp = globals().get("heatpump")
+    if hp is not None and hp.configured and hp.data and hp.data.get("compressor") is not None:
+        out.append({"id": "heatpump", "name": "Wärmepumpe", "type": "heatpump", "on": bool(hp.data["compressor"]),
+                    "knownW": hp.power_w(), "learn": False})         # lernt selbst (heatpump.py), hier nur herausrechnen
+    try:
+        for u in daikin.units or []:
+            if u.get("online", True):
+                out.append({"id": "daikin:" + str(u["id"]), "name": u.get("name") or "Klimagerät", "type": "climate",
+                            "brand": "Daikin", "on": bool(u.get("on"))})
+    except Exception:
+        pass
+    return out
+
+
+appliances_learned = _alearn.ApplianceLearner(lambda: list(consumers.buf), _learn_sources)
+smartstart.learner = appliances_learned
+
 
 @app.get("/api/consumers")
 def consumers_report(p=Depends(person)):
@@ -1699,7 +1754,40 @@ def consumers_report(p=Depends(person)):
         home_now = consumers.buf[-1][1]
     rep = consumers.report(states, home_now)
     _add_appliance_consumers(rep)
+    _add_learned_appliances(rep)
     return rep
+
+
+def _add_learned_appliances(rep):
+    """Gelernte Hausgeräte, Klimageräte und Wärmepumpe dazu (seit 2.46). Miele-Einträge werden ergänzt, nicht doppelt."""
+    try:
+        sources = {s["id"]: s for s in _learn_sources()}
+    except Exception:
+        sources = {}
+    have = {d["id"]: d for d in rep["devices"]}
+    for item in appliances_learned.report(sources):
+        old = have.get(item["id"])
+        if old is not None:                        # Miele: Gerät misst selbst, gelernte Werte ergänzen
+            old.update({k: v for k, v in item.items() if k not in ("nowWatts", "on", "name") and v is not None})
+            continue
+        rep["devices"].append(item)
+        rep["knownNow"] = round((rep.get("knownNow") or 0) + item["nowWatts"])
+        if rep.get("rest") is not None:
+            rep["rest"] = round(rep["rest"] - item["nowWatts"])
+    hp = globals().get("heatpump")
+    if hp is not None and hp.configured and hp.power_w():
+        on = bool((hp.data or {}).get("compressor"))
+        now = hp.power_w() if on else 0
+        rep["devices"].append({"id": "heatpump", "name": "Wärmepumpe", "kind": "appliance", "type": "heatpump",
+                               "watts": hp.power_w(), "samples": len(hp.eff.get("samples") or []), "on": on,
+                               "nowWatts": now, "learnedFrom": "Verdichter an/aus",
+                               "confidence": _alearn.ApplianceLearner.confidence({"steps": hp.eff.get("samples") or []})})
+        rep["knownNow"] = round((rep.get("knownNow") or 0) + now)
+        if rep.get("rest") is not None:
+            rep["rest"] = round(rep["rest"] - now)
+    rep["appliances"] = {"learning": dict(appliances_learned.stats),
+                         "running": [r.get("name") for r in appliances_learned.runs.values()]}
+    rep["devices"].sort(key=lambda x: -(x.get("watts") or 0))
 
 
 def _add_appliance_consumers(rep):
@@ -1723,6 +1811,25 @@ def _add_appliance_consumers(rep):
         if rep.get("rest") is not None:
             rep["rest"] = round(rep["rest"] - now)
     rep["devices"].sort(key=lambda x: -(x.get("watts") or 0))
+
+
+# ---------------------------------------------------------------- Erzeuger (je Wechselrichter: jetzt, Spitze heute, Rekord)
+import producers as _producers  # noqa: E402
+
+producers = _producers.Producers(energy_history)
+
+
+@app.get("/api/producers")
+def producers_report(p=Depends(person)):
+    """Je PV-Quelle aus evcc: aktuelle Leistung, Spitze heute (mit Uhrzeit), kWh heute und Rekord-Spitze."""
+    s = _evcc_state()
+    s = s.get("result", s)
+    sites = hub_config.get("evcc.sites", {}) or {}
+    pv = [dict(x, site="other" if sites.get(x.get("title") or "") == "other" else "house")
+          for x in (s.get("pv") or []) if isinstance(x, dict)]
+    if not pv and s.get("pvPower") is not None:
+        pv = [{"name": "pv", "title": "PV", "power": s.get("pvPower"), "site": "house"}]
+    return producers.report(pv)
 
 
 # ---------------------------------------------------------------- Auto laden (evcc-Ladepunkte steuern)

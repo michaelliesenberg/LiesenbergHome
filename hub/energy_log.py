@@ -144,11 +144,18 @@ class EnergyLog:
 
     # ---- Lesen
     def rows(self, d):
+        out = []
         try:
-            with open(self._path(d)) as f:
-                return [json.loads(line) for line in f if line.strip()]
-        except (OSError, ValueError):
-            return []
+            with open(self._path(d), errors="replace") as f:
+                for line in f:
+                    try:
+                        if line.strip():
+                            out.append(json.loads(line))
+                    except ValueError:          # kaputte Zeile (z. B. Stromausfall beim Schreiben) überspringen
+                        continue
+        except OSError:
+            pass
+        return out
 
     def day(self, d):
         rows = self.rows(d)

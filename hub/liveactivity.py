@@ -4,6 +4,12 @@ Ablauf: Die App meldet ihr „Push-to-Start"-Token (/api/liveactivity/register).
 Trockner, Backofen über Home Connect/Miele, Saugroboter, Auto an der Wallbox), schickt der Hub „start" mit Restzeit –
 die Anzeige zählt dann selbst herunter. Für jede laufende Activity meldet die App ein Aktualisierungs-Token; darüber
 kommen Fortschritt (höchstens alle 5 Min.) und am Ende „fertig". Nur Anzeige – der Hub schaltet hier nichts.
+
+Seit 2.47.1 (falsche „Backofen läuft"-Anzeigen):
+• Aktualisierungs-Token pro Gerät UND pro iPhone – vorher überschrieb das zweite iPhone das erste, und nur eins bekam „fertig".
+• Läuft ein Gerät nicht (mehr), bekommt jedes noch gemeldete Token „fertig" – auch eins, das die App erst später meldet.
+• Laufende Activities werden gespeichert: nach einem Hub-Neustart kein zweites „läuft" für denselben Lauf.
+• Ein Gerät gilt erst als fertig, wenn es 90 s lang nicht mehr läuft (kurze Aussetzer von Home Connect).
 """
 import json
 import os
@@ -14,6 +20,9 @@ from hub_config import DATA_DIR
 
 FILE = os.path.join(DATA_DIR, "liveactivity.json")
 TOPIC = "biz.liesenberg.home.push-type.liveactivity"
+GRACE = 90              # so lange darf ein Gerät aus der Liste fallen, ohne dass „fertig" geschickt wird
+STARTUP_QUIET = 180     # nach dem Hub-Start erst einmal kein „fertig" (Gerätelisten laden noch)
+TOKEN_MAX_AGE = 2 * 86400
 KIND = {"Dishwasher": "dishwasher", "Washer": "washer", "WasherDryer": "washer", "Dryer": "dryer", "Oven": "oven"}
 
 
@@ -24,8 +33,14 @@ class LiveActivities:
         self._lock = threading.Lock()
         d = self._load()
         self.start_tokens = d.get("start", {})        # Token → env
-        self.update_tokens = d.get("update", {})      # Geräte-ID → {token, env}
-        self.active = {}                              # Geräte-ID → {start, end, sent}
+        self.update_tokens = {}                       # Geräte-ID → {Token → {env, at}}
+        for did, t in (d.get("update") or {}).items():
+            if isinstance(t, dict) and "token" in t:  # altes Format: nur ein Token pro Gerät
+                t = {t["token"]: {"env": t.get("env", "production"), "at": t.get("at", 0)}}
+            if isinstance(t, dict):
+                self.update_tokens[did] = t
+        self.active = d.get("active", {})             # Geräte-ID → {start, end, sent, dev, missing}
+        self.booted = time.time()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _load(self):
@@ -39,15 +54,16 @@ class LiveActivities:
         with self._lock:
             tmp = FILE + ".tmp"
             with open(tmp, "w") as f:
-                json.dump({"start": self.start_tokens, "update": self.update_tokens}, f)
+                json.dump({"start": self.start_tokens, "update": self.update_tokens, "active": self.active}, f)
             os.replace(tmp, FILE)
 
     def register(self, body):
         if body.get("startToken"):
             self.start_tokens[body["startToken"]] = body.get("env", "production")
         if body.get("updateToken") and body.get("deviceID"):
-            self.update_tokens[body["deviceID"]] = {"token": body["updateToken"], "env": body.get("env", "production"),
-                                                    "at": int(time.time())}
+            with self._lock:
+                self.update_tokens.setdefault(body["deviceID"], {})[body["updateToken"]] = {
+                    "env": body.get("env", "production"), "at": int(time.time())}
         self._save()
         return {"ok": True}
 
@@ -93,18 +109,24 @@ class LiveActivities:
                 self.start_tokens.pop(tok, None); self._save()
         print(f"[LIVE] Start: {dev['name']}", flush=True)
 
-    def _update(self, dev, start, end, done=False):
-        t = self.update_tokens.get(dev["id"])
-        if not t:
+    def _update(self, dev, start, end, done=False, dismiss=15 * 60):
+        toks = self.update_tokens.get(dev["id"])
+        if not toks:
             return
         now = int(time.time())
         aps = {"timestamp": now, "event": "end" if done else "update", "content-state": self._state(dev, start, end, done)}
         if done:
-            aps["dismissal-date"] = now + 15 * 60
+            aps["dismissal-date"] = now + dismiss
         else:
             aps["stale-date"] = int((end or now + 3 * 3600) + 900)
-        if self._send(t["token"], t["env"], {"aps": aps}, priority=10 if done else 5) is None or done:
-            self.update_tokens.pop(dev["id"], None); self._save()
+        changed = False
+        for tok, t in list(toks.items()):
+            if self._send(tok, t.get("env", "production"), {"aps": aps}, priority=10 if done else 5) is None or done:
+                toks.pop(tok, None); changed = True
+        if not toks:
+            self.update_tokens.pop(dev["id"], None)
+        if changed:
+            self._save()
 
     # ------------------------------------------------------------------ Überwachung
     def _loop(self):
@@ -117,24 +139,51 @@ class LiveActivities:
             time.sleep(30)
 
     def _tick(self):
-        if not self.start_tokens and not self.update_tokens:
+        if not self.start_tokens and not self.update_tokens and not self.active:
             return
         now = time.time()
         running = {d["id"]: d for d in self.sources()}
+        dirty = False
         for did, dev in running.items():
             end = now + dev["remaining"] if dev.get("remaining") else None
             a = self.active.get(did)
             if a is None:
                 self.active[did] = {"start": now, "end": end, "sent": now, "dev": dev}
+                dirty = True
                 self._start(dev, now, end)
-            elif now - a["sent"] > 300:
-                a.update(end=end or a["end"], sent=now, dev=dev)
-                self._update(dev, a["start"], a["end"])
+            else:
+                if a.pop("missing", None):
+                    dirty = True
+                if now - a["sent"] > 300:
+                    a.update(end=end or a["end"], sent=now, dev=dev)
+                    dirty = True
+                    self._update(dev, a["start"], a["end"])
+        if now - self.booted < STARTUP_QUIET:
+            if dirty:
+                self._save()
+            return
         for did in [d for d in self.active if d not in running]:
-            a = self.active.pop(did)
+            a = self.active[did]
+            a.setdefault("missing", now)
+            if now - a["missing"] < GRACE:
+                continue
+            self.active.pop(did)
+            dirty = True
             dev = dict(a["dev"], status="fertig", progress=1.0)
             self._update(dev, a["start"], a["end"], done=True)
             print(f"[LIVE] Ende: {dev['name']}", flush=True)
+        # Tokens für Geräte, die gar nicht (mehr) laufen – z. B. ein zweites iPhone, das seine Anzeige erst später meldet,
+        # oder eine Anzeige von vor einem Neustart: „fertig" schicken und sofort ausblenden, sonst steht dort stundenlang „läuft".
+        for did in [d for d in self.update_tokens if d not in running and d not in self.active]:
+            print(f"[LIVE] Alte Anzeige beendet: {did}", flush=True)
+            self._update({"id": did, "status": "fertig", "progress": 1.0}, now, now, done=True, dismiss=0)
+            self.update_tokens.pop(did, None)
+            dirty = True
+        for did, toks in list(self.update_tokens.items()):
+            for tok in [k for k, t in toks.items() if now - t.get("at", now) > TOKEN_MAX_AGE]:
+                toks.pop(tok); dirty = True
+        if dirty:
+            self._save()
 
 
 def collect(homeconnect, miele, vacuum, evcc_state_fn):

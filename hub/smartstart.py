@@ -5,6 +5,10 @@ Der Planer schätzt die beste Zeit (Prognose). Gestartet wird aber nach der ECHT
 Zeit, sobald 5 Minuten lang genug Überschuss da ist (Einspeisung + Akku-Laden ≥ Leistung des Geräts). Kommt bis
 zum Fensterende nicht genug Sonne, startet das Gerät spätestens dann (bzw. so, dass „fertig bis …" klappt).
 Start über Home Connect, Miele (MobileStart) oder LG ThinQ (Fernstart). Aufträge liegen in DATA_DIR/smartstart.json (übersteht Neustarts).
+
+Wie viel Sonne nötig ist (seit 2.46): 1. eigener Wert aus der App (DATA_DIR/smartstart-need.json), 2. gelernt –
+mittlere Leistung aus den letzten Läufen des Geräts (appliance_learn.py, je Programm, ab 3 Läufen), 3. sonst der
+Standardwert je Gerätetyp (WATTS). Die gelernte Laufzeit begrenzt außerdem das Fenster bei „fertig bis".
 """
 import json
 import os
@@ -14,6 +18,7 @@ import time
 from hub_config import DATA_DIR
 
 FILE = os.path.join(DATA_DIR, "smartstart.json")
+NEED_FILE = os.path.join(DATA_DIR, "smartstart-need.json")    # eigener Wert je Gerät: {id: Watt}
 PROFILE = {"Washer": "washer", "WasherDryer": "washer", "Dishwasher": "dishwasher", "Dryer": "dryer"}
 WATTS = {"washer": 800, "dishwasher": 700, "dryer": 1500}          # mittlere Leistung (wie planner.APPLIANCES)
 MINUTES = {"washer": 120, "dishwasher": 150, "dryer": 120}
@@ -35,13 +40,15 @@ class SmartStart:
         self.surplus_fn = None            # → aktueller Überschuss in W (Einspeisung + Akku-Laden), in house_server gesetzt
         self._surplus = []
         self.plan_fn = plan_fn            # (profile_id, deadline) → {"start", "end", "reason", "saving", ...}
+        self.learner = None               # appliance_learn.ApplianceLearner (wird in house_server gesetzt)
         self._lock = threading.Lock()
         self.jobs = self._load()
+        self.manual = self._load(NEED_FILE)
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def _load(self):
+    def _load(self, path=FILE):
         try:
-            with open(FILE) as f:
+            with open(path) as f:
                 return json.load(f)
         except (OSError, ValueError):
             return {}
@@ -51,6 +58,44 @@ class SmartStart:
         with open(tmp, "w") as f:
             json.dump(self.jobs, f)
         os.replace(tmp, FILE)
+
+    def need(self, dev):
+        """Wie viel Überschuss (W) mindestens da sein muss → {watts, source: manuell|gelernt|Standard, ...}"""
+        did, prof = dev["id"], dev.get("profile")
+        learned = None
+        if self.learner is not None:
+            try:
+                learned = self.learner.need(did, dev.get("program"))
+            except Exception:
+                learned = None
+        out = {"watts": WATTS.get(prof, 800), "source": "Standard", "minutes": MINUTES.get(prof, 120),
+               "defaultW": WATTS.get(prof, 800), "learned": learned}
+        if learned:
+            out.update(watts=max(200, min(learned["watts"], 4000)), source="gelernt", minutes=learned["minutes"],
+                       kwh=learned["kwh"], runs=learned["runs"])
+        if self.manual.get(did):
+            out.update(watts=int(self.manual[did]), source="manuell")
+        return out
+
+    def set_need(self, ha_id, watts=None):
+        """Eigenen Wert setzen (W) bzw. mit None wieder dem Gelernten überlassen."""
+        if watts is not None and not 100 <= watts <= 10000:
+            raise ValueError("Bitte einen Wert zwischen 0,1 und 10 kW")
+        with self._lock:
+            if watts is None:
+                self.manual.pop(ha_id, None)
+            else:
+                self.manual[ha_id] = int(watts)
+            tmp = NEED_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.manual, f)
+            os.replace(tmp, NEED_FILE)
+        dev = next((d for d in self.devices() if d["id"] == ha_id), None)
+        if dev and (self.jobs.get(ha_id) or {}).get("status") == "geplant":
+            with self._lock:
+                self.jobs[ha_id].update(needW=dev["needW"], needSource=dev["needSource"])
+                self._save()
+        return dev
 
     def devices(self):
         out = []
@@ -62,11 +107,22 @@ class SmartStart:
         for a in apps:
             prof = PROFILE.get(a.get("type"))
             if prof:
-                out.append({"id": a["id"], "name": label(a), "brand": a.get("brand"), "type": a.get("type"),
-                            "profile": prof, "connected": a.get("connected", False),
-                            "remoteStart": a.get("remoteStart", False),
-                            "state": a.get("stateText"), "job": self.jobs.get(a["id"])})
+                d = {"id": a["id"], "name": label(a), "brand": a.get("brand"), "type": a.get("type"),
+                     "profile": prof, "connected": a.get("connected", False),
+                     "remoteStart": a.get("remoteStart", False), "program": a.get("program"),
+                     "state": a.get("stateText"), "job": self.jobs.get(a["id"])}
+                n = self.need(d)
+                d.update(needW=n["watts"], needSource=n["source"], needMinutes=n["minutes"], needKWh=n.get("kwh"),
+                         learnedRuns=(n["learned"] or {}).get("runs") or self._runs(a["id"]),
+                         defaultW=n["defaultW"], manualW=self.manual.get(a["id"]))
+                out.append(d)
         return out
+
+    def _runs(self, did):
+        try:
+            return (self.learner.data.get(did) or {}).get("runs", 0) if self.learner is not None else 0
+        except Exception:
+            return 0
 
     def schedule(self, ha_id, deadline=None, by=""):
         dev = next((d for d in self.devices() if d["id"] == ha_id), None)
@@ -82,10 +138,11 @@ class SmartStart:
         ws = max(now, planned - WINDOW)
         we = planned + WINDOW
         if deadline:                                          # muss rechtzeitig fertig werden
-            we = min(we, deadline - MINUTES.get(dev["profile"], 120) * 60)
+            we = min(we, deadline - (dev.get("needMinutes") or MINUTES.get(dev["profile"], 120)) * 60)
         we = max(we, ws)
         job = {"haId": ha_id, "name": dev["name"], "start": planned, "end": best["end"],
-               "windowStart": int(ws), "windowEnd": int(we), "needW": WATTS.get(dev["profile"], 800),
+               "windowStart": int(ws), "windowEnd": int(we), "needW": dev.get("needW") or WATTS.get(dev["profile"], 800),
+               "needSource": dev.get("needSource", "Standard"),
                "reason": best["reason"], "saving": best["saving"], "deadline": deadline,
                "status": "geplant", "by": by, "created": int(now)}
         with self._lock:
@@ -137,7 +194,7 @@ class SmartStart:
                         continue
                     need = job.get("needW") or 800
                     if len(self._surplus) >= SUSTAIN and min(self._surplus) >= need:
-                        self._run_job(ha_id, f"Sonnenüberschuss {min(self._surplus) / 1000:.1f} kW".replace(".", ","))
+                        self._run_job(ha_id, f"Sonnenüberschuss {min(self._surplus) / 1000:.1f} kW (braucht {need / 1000:.1f} kW)".replace(".", ","))
                     elif now >= we:
                         self._run_job(ha_id, "spätestens am Fensterende – zu wenig Sonne")
                 # erledigte/fehlgeschlagene Aufträge nach 12 h aufräumen
