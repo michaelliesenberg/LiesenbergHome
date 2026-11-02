@@ -240,15 +240,34 @@ def _wrap_pedestrian(obj):
                 target["devices"].append({"id": PED_ID, "name": f"{name} – Fußgänger", "kind": "gate", "restricted": True})
         except Exception as e:
             print(f"[TOR] Fußgänger-Gerät: {e}", flush=True)
+        sg = globals().get("smart_gates")
+        if sg is not None:                            # Tor Süd/Nord zu (gate_smart) – im Raum des jeweiligen Tors
+            try:
+                sg.struct_fn = orig_struct
+                rooms = [r for fl in s.get("floors", []) for r in fl.get("rooms", [])]
+                for open_id, v in sg.virtual():
+                    room = next((r for r in rooms if any(d["id"] == open_id for d in r.get("devices", []))), None)
+                    if room is not None and not any(d["id"] == v["id"] for d in room["devices"]):
+                        room["devices"].append(v)
+            except Exception as e:
+                print(f"[TOR] Tor Süd/Nord-Geräte: {e}", flush=True)
         return s
 
     def command(did, cmd):
+        if did.startswith("gate:"):                   # Tor Süd/Nord zu
+            if not cmd.get("trigger") and not cmd.get("on"):
+                return None
+            try:
+                return smart_gates.command(did, "Szene/Befehl")
+            except RuntimeError as e:
+                raise RuntimeError(str(e))
         if did != PED_ID:
             res = orig_cmd(did, cmd)
-            ped = globals().get("pedestrian")
+            ped, sg = globals().get("pedestrian"), globals().get("smart_gates")
             if ped is not None and cmd.get("trigger"):
-                try:
-                    ped.observe_command(did)          # Torstellung schätzen (gate_ped.GateModel)
+                try:                                  # Torstellung schätzen (gate_ped.GateModel)
+                    if not (sg is not None and sg.observe(did)):
+                        ped.observe_command(did)
                 except Exception as e:
                     print(f"[TOR] Schätzung: {e}", flush=True)
             return res
@@ -267,6 +286,9 @@ def _wrap_pedestrian(obj):
         ped = globals().get("pedestrian")
         if ped is not None:                           # LUXOR Zentral aus trifft auch die Tor-Ausgänge → Stellung unsicher
             ped.model.forget()
+            sg = globals().get("smart_gates")
+            if sg is not None:
+                sg.forget_all()
             print("[TOR] Zentral aus → Torstellung unbekannt", flush=True)
         return res
     obj.central_off = central_off
@@ -1197,7 +1219,7 @@ pedestrian = _gate_ped.Pedestrian(lambda did, cmd: need_home().command(did, cmd)
 
 def _gate_devices():
     try:
-        return [{"id": d_id, "name": d["name"]} for d_id, d in devices.device_index(structure()).items() if d["kind"] == "gate"]
+        return [{"id": d_id, "name": d["name"]} for d_id, d in devices.device_index(structure()).items() if d["kind"] == "gate" and not d_id.startswith("gate:")]
     except Exception:
         return []
 
@@ -1221,6 +1243,29 @@ def _read_on(did):
 
 
 pedestrian.watch(_read_on)
+
+import gate_smart as _gate_smart  # noqa: E402
+
+smart_gates = _gate_smart.SmartGates(
+    lambda did, cmd: need_home().command(did, cmd),
+    busy_fn=lambda g: pedestrian.busy() and pedestrian.load()["devices"].get("open") == g["open"])
+
+
+def _seed_gate_scenes():
+    """Szenen „Tor Süd zu“, „Tor Nord zu“ einmal anlegen, sobald LUXOR geladen ist."""
+    for _ in range(20):
+        try:
+            if home() is not None:
+                structure()                           # setzt smart_gates.struct_fn und belegt die Tore
+                if smart_gates.gates():
+                    smart_gates.seed_scenes(scenes)
+                    return
+        except Exception as e:
+            print(f"[TOR] Tor-Szenen: {e}", flush=True)
+        time.sleep(30)
+
+
+threading.Thread(target=_seed_gate_scenes, daemon=True).start()
 
 
 @app.get("/api/gate/pedestrian")

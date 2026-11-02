@@ -22,6 +22,7 @@ Schutz:
 """
 import json
 import os
+import re
 import threading
 import time
 
@@ -181,6 +182,19 @@ class GateModel:
             self._save()
 
 
+_MODELS, _MODELS_LOCK = {}, threading.Lock()
+
+
+def model_for(open_id, travel_fn=lambda: TRAVEL):
+    """Eine Schätzung je Tor (erkannt am „öffnen“-Ausgang) – Fußgänger-Ablauf und Tor Süd/Nord teilen sie sich."""
+    with _MODELS_LOCK:
+        m = _MODELS.get(open_id)
+        if m is None:
+            key = re.sub(r"[^A-Za-z0-9]", "", str(open_id))[-12:] or "tor"
+            m = _MODELS[open_id] = GateModel(travel_fn, os.path.join(DATA_DIR, f"gate-position-{key}.json"))
+        return m
+
+
 def plan(est, travel, gap, stale=STALE):
     """Fußgänger-Abfolge aus der geschätzten Torstellung → (Schritte, Begründung).
     Ziel immer: Tor zu, dann „gap“ Sekunden auf, Stopp."""
@@ -221,7 +235,7 @@ def plan(est, travel, gap, stale=STALE):
 class Pedestrian:
     def __init__(self, command_fn, notify_fn=None, sleep_fn=time.sleep, blocked_fn=None, model=None):
         self.command_fn, self.notify_fn, self.sleep_fn = command_fn, notify_fn, sleep_fn
-        self.model = model or GateModel(lambda: self.load()["travel"])
+        self._model = model
         self.blocked_fn = blocked_fn          # → Grund, warum gerade gar nichts starten darf (z. B. Panik), oder None
         self._lock = threading.Lock()
         self._cancel = threading.Event()
@@ -244,6 +258,10 @@ class Pedestrian:
             json.dump(cfg, f, indent=1)
         os.replace(FILE + ".tmp", FILE)
         return cfg
+
+    @property
+    def model(self):
+        return self._model or model_for(self.load()["devices"].get("open"), lambda: self.load()["travel"])
 
     def role_of(self, did, cfg=None):
         cfg = cfg or self.load()

@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.47.1",
- "file": "hub-2.47.1.tar.gz",
- "sha256": "3dc009ee967dc986670d0c32d702a98ff20dea75252c45ad32cb57dd598afc40",
+ "version": "2.48.0",
+ "file": "hub-2.48.0.tar.gz",
+ "sha256": "ef1a799448135ac7b06afe509597cb505b6f8998f84f9bf0941385c7822e152e",
  "files": [
   "VERSION",
   "appliance_learn.py",
@@ -13,6 +13,7 @@
   "energy_log.py",
   "forecast.py",
   "gate_ped.py",
+  "gate_smart.py",
   "geo_ref.py",
   "ha.py",
   "heatpump.py",
@@ -48,6 +49,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Behebt falsche Backofen-l\u00e4uft-Anzeigen (Live-Aktivit\u00e4t endet jetzt auf allen iPhones, kein zweites l\u00e4uft nach Neustart)",
- "created": 1793448739
+ "notes": "Neue Tor-Schalter \u201eTor Nord zu\u201c und \u201eTor S\u00fcd zu\u201c (auch als Szenen und f\u00fcr Siri): fahren nur zu, wenn das Tor laut Hub-Sch\u00e4tzung offen ist; ist die Stellung unsicher, erst ganz auf, dann zu.",
+ "created": 1793642930
 }
