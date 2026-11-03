@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.48.0",
- "file": "hub-2.48.0.tar.gz",
- "sha256": "ef1a799448135ac7b06afe509597cb505b6f8998f84f9bf0941385c7822e152e",
+ "version": "2.48.1",
+ "file": "hub-2.48.1.tar.gz",
+ "sha256": "1f4d28e06fd403aefdeaed4a67c95177103260f50c74bc3c6f96698ec4698d81",
  "files": [
   "VERSION",
   "appliance_learn.py",
@@ -49,6 +49,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Neue Tor-Schalter \u201eTor Nord zu\u201c und \u201eTor S\u00fcd zu\u201c (auch als Szenen und f\u00fcr Siri): fahren nur zu, wenn das Tor laut Hub-Sch\u00e4tzung offen ist; ist die Stellung unsicher, erst ganz auf, dann zu.",
- "created": 1793642930
+ "notes": "Tor Nord/S\u00fcd zu: Kennt der Hub die Torstellung nicht, passiert nichts (statt erst ganz aufzufahren).",
+ "created": 1793711664
 }

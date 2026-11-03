@@ -4,8 +4,7 @@ Jedes Tor hat zwei LUXOR-Impuls-Ausgänge: „öffnen“ (fährt immer auf, bei 
 (eigentlich Start/Stop/Zu: stoppt eine Fahrt, aus dem Stand fährt es andersherum als zuletzt).
 
   zu:  aus der Schätzung – offen → ein Start/Stop-Impuls; fährt auf → stoppen und zufahren; schon zu oder fährt
-       schon zu → nichts; Stellung unsicher (lange kein Hub-Befehl, Handsender, Zentral aus) → erst „öffnen“,
-       volle Fahrzeit warten, dann zufahren – das endet immer mit geschlossenem Tor.
+       schon zu → nichts; Stellung unsicher (lange kein Hub-Befehl, Handsender, Zentral aus) → vermutlich zu, nichts.
 
 Für Szenen und Siri gibt es je Tor ein Gerät (Typ Tor, nur mit Tor-Recht): gate:<key>:zu.
 „Auf“ braucht es nicht (Michael 31.10.): der „öffnen“-Ausgang wirkt immer richtig.
@@ -36,8 +35,9 @@ def plan_close(est, travel, stale=gate_ped.STALE):
     if d == 1:
         return [{"pulse": "step"}, {"wait": 1.0}, {"pulse": "step"}], "fährt auf → anhalten, zufahren"
     if not est["known"] or age is None or age > stale:
-        return ([{"pulse": "open"}, {"wait": round(travel + 2, 1)}, {"pulse": "step"}],
-                "Stellung unsicher → erst ganz auf, dann zu")
+        # Michael 2.11.: unsicher → annehmen, dass es schon zu ist (meistens so; wie beim Fußgänger-Ablauf).
+        # Früher: erst ganz auf, dann zu – öffnete geschlossene Tore unnötig.
+        return [], "Stellung unsicher → vermutlich schon zu, nichts tun"
     if pos <= 0.01:
         return [], "ist schon zu"
     if est["last"] == 1 or pos >= 0.99:
