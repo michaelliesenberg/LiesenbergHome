@@ -7,7 +7,8 @@ Einrichtungsseite unter System → Mitteilungen hochladen (Key-ID + Team-ID). De
 Abos je Person: washer (Wäsche/Spülen fertig), car (Auto voll/eingesteckt), weekly (Wochenbericht), smart (Auto-Start),
 wx_alert / wx_rain / wx_gust (Wetter: DWD-Warnung, Regen in Kürze, Sturmböen – forecast.py),
 solar (Sonnenstrom übrig), monthly (Monatsbericht), cheap (Billigstrom, nur dynamischer Tarif),
-wx_frost (Frost), garden (Gieß-Hinweis), maint (Wartung fällig – maintenance.py).
+wx_frost (Frost), garden (Gieß-Hinweis), maint (Wartung fällig – maintenance.py),
+door (Es klingelt – DoorBird, mit Bild: doorbird.py).
 """
 import base64
 import json
@@ -19,7 +20,7 @@ from hub_config import DATA_DIR
 
 KEY_FILE = os.path.join(DATA_DIR, "apns.p8")
 DEV_FILE = os.path.join(DATA_DIR, "push.json")
-TOPICS = ("washer", "car", "weekly", "smart", "wx_alert", "wx_rain", "wx_gust", "vacuum", "mower", "solar", "monthly", "cheap", "wx_frost", "garden", "maint")
+TOPICS = ("washer", "car", "weekly", "smart", "wx_alert", "wx_rain", "wx_gust", "vacuum", "mower", "solar", "monthly", "cheap", "wx_frost", "garden", "maint", "door")
 BUNDLE = "biz.liesenberg.home"
 
 
@@ -100,7 +101,7 @@ class Push:
         self._jwt = (time.time(), f"{head}.{body}.{sig}")
         return self._jwt[1]
 
-    def send(self, topic, title, body, person_ids=None, data=None, category=None):
+    def send(self, topic, title, body, person_ids=None, data=None, category=None, aps_extra=None):
         """An alle Geräte mit diesem Abo (optional nur bestimmte Personen). Läuft im Hintergrund."""
         if not self.configured:
             return 0
@@ -115,6 +116,8 @@ class Push:
             data = dict(data or {})
             if category:
                 data["_category"] = category
+            if aps_extra:
+                data["_aps"] = dict(aps_extra)    # z. B. mutable-content (Bild nachladen), interruption-level
             threading.Thread(target=self._deliver, args=(targets, title, body, topic, data), daemon=True).start()
         return len(targets)
 
@@ -126,7 +129,7 @@ class Push:
             return
         data = dict(data)
         category = data.pop("_category", None)
-        aps = {"alert": {"title": title, "body": body}, "sound": "default", "thread-id": topic}
+        aps = {"alert": {"title": title, "body": body}, "sound": "default", "thread-id": topic, **data.pop("_aps", {})}
         if category:
             aps["category"] = category            # Aktions-Knöpfe in der Mitteilung (z. B. „Abbrechen“)
         payload = {"aps": aps, "topic": topic, **data}

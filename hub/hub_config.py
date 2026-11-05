@@ -20,7 +20,8 @@ DEFAULTS = {
     "luxor": {"host": "", "user": "admin", "password": ""},
     "homeassistant": {"url": "", "token": ""},
     "shelly": {"devices": []},            # siehe shelly.py
-    "heatpump": {"host": ""},             # Luxtronik-Wärmepumpe (z. B. 192.168.178.87), leer = keine
+    "heatpump": {"host": ""},
+    "doorbird": {"host": "", "user": "", "password": ""},   # DoorBird-Türstation (doorbird.py), host leer = automatisch suchen             # Luxtronik-Wärmepumpe (z. B. 192.168.178.87), leer = keine
     "lgthinq": {"pat": "", "country": "DE", "client_id": ""},   # LG ThinQ Connect (Personal Access Token)
     "lang": "de",                         # Sprache der Einrichtungsseite und der Mitteilungen: "de" | "pt-BR"
     "evcc": {"url": "", "sites": {}},

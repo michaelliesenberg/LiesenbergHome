@@ -19,6 +19,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
+  GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test – Türklingel (DoorBird)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import json
@@ -2434,9 +2435,52 @@ def pico_file(path: str, request: Request):
     return FileResponse(full, media_type="application/json" if full.endswith(".json") else "text/plain")
 
 
+# ---------------------------------------------------------------- Türklingel (DoorBird)
+import doorbird as _doorbird  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
+
+doorbird = _doorbird.DoorBird(lambda: hub_config.get("doorbird") or {},
+                              lambda host: hub_config.update({"doorbird": {"host": host}}), push, lan_ip)
+
+
+def _jpeg(data):
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/doorbird")
+def doorbird_state(p=Depends(person)):
+    return doorbird.state()
+
+
+@app.get("/api/doorbird/snapshot/{rid}")
+def doorbird_snapshot(rid: str, p=Depends(person)):
+    """Bild vom Klingeln – lädt die App in die Mitteilung nach."""
+    path = doorbird.image_path(rid)
+    if not path:
+        raise HTTPException(status_code=404, detail="Bild nicht (mehr) vorhanden")
+    with open(path, "rb") as f:
+        return _jpeg(f.read())
+
+
+@app.get("/api/doorbird/live")
+def doorbird_live(p=Depends(person)):
+    img = doorbird.snapshot()
+    if img is None:
+        raise HTTPException(status_code=502, detail=doorbird.error or "DoorBird nicht erreichbar")
+    return Response(img, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/doorbird/test")
+def doorbird_test(p=Depends(person)):
+    """Probe-Klingeln: Bild holen und Push nur an mich schicken."""
+    if not doorbird.configured:
+        raise HTTPException(status_code=400, detail="DoorBird ist nicht eingerichtet")
+    return doorbird.ring(test=True, only=[p["id"]])
+
+
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
-                           "nightheat": nightheat,
+                           "nightheat": nightheat, "doorbird": doorbird,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 

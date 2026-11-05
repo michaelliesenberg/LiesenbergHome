@@ -357,8 +357,54 @@ def attach(app, ctx):
                 + (f'<div class=card><h2>LUXORliving</h2>{lux}</div>' if b == "luxor" else "")
                 + (f'<div class=card><h2>Home Assistant</h2>{hass}</div>' if b == "homeassistant" else "")
                 + (_shelly_card(c, csrf) if b == "shelly" else "")
+                + _doorbird_card(c, csrf)
                 + names)
         return _page("Geräte", body, "haus", csrf)
+
+    def _doorbird_card(c, csrf):
+        db = CTX.get("doorbird")
+        if db is None:
+            return ""
+        d = c.get("doorbird") or {}
+        steps = ('<p class=muted>Wenn jemand klingelt, kommt eine Mitteilung mit Bild aufs iPhone. '
+                 'Den Benutzer findest du in der DoorBird-App unter Einstellungen → Verwaltung → Benutzer. '
+                 'Er braucht die Rechte <b>API-Operator</b> und <b>Live-Bild jederzeit</b>.</p>')
+        form = _form("/setup/doorbird/save",
+                     '<div class=row><div>' + _field("host", "Adresse der DoorBird", d.get("host"), placeholder="leer = automatisch suchen")
+                     + '</div><div>' + _field("user", "DoorBird-Benutzer", d.get("user"), placeholder="z. B. abcdef0001") + '</div></div>'
+                     + _field("password", "Passwort", "", "password", "gespeichert – leer lassen = unverändert" if d.get("password") else ""),
+                     csrf, "Speichern & testen")
+        st = ""
+        if db.configured:
+            st = (f'<p class=ok>✓ verbunden mit {E(d.get("host") or "")} – wartet aufs Klingeln</p>' if db.connected
+                  else f'<p class=bad>{E(db.error or "verbindet …")}</p>')
+            st += _form("/setup/doorbird/test", "", csrf, "Probe-Klingeln (Push an alle mit Abo „Klingel“)")
+        return f'<div class=card><h2>Türklingel (DoorBird)</h2>{steps}{form}{st}</div>'
+
+    @app.post("/setup/doorbird/save")
+    async def doorbird_save(request: Request):
+        import asyncio
+        f = await request.form()
+        ch = {"host": (f.get("host") or "").strip().replace("http://", "").rstrip("/"),
+              "user": (f.get("user") or "").strip()}
+        if (f.get("password") or "").strip():
+            ch["password"] = f.get("password").strip()
+        hub_config.update({"doorbird": ch})
+        try:
+            info = await asyncio.to_thread(CTX["doorbird"].test)
+            host = hub_config.get("doorbird.host")
+            return _done(request.state.tok, "haus", True,
+                         f"DoorBird verbunden ({host}, Firmware {info.get('firmware') or '?'}).")
+        except Exception as e:
+            CTX["doorbird"].error = str(e)[:160]
+            return _done(request.state.tok, "haus", False, f"DoorBird: {e}")
+
+    @app.post("/setup/doorbird/test")
+    async def doorbird_test(request: Request):
+        import asyncio
+        e = await asyncio.to_thread(CTX["doorbird"].ring, True)
+        return _done(request.state.tok, "haus", True,
+                     "Probe-Klingeln geschickt" + (" mit Bild." if e and e.get("image") else " – aber ohne Bild (Recht „Live-Bild“ fehlt?)."))
 
     @app.post("/setup/save/backend")
     async def save_backend(request: Request):
