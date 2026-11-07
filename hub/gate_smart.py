@@ -52,6 +52,7 @@ class SmartGates:
         self.command_fn, self.struct_fn, self.sleep_fn = command_fn, struct_fn, sleep_fn
         self.busy_fn = busy_fn                 # → True, wenn der Fußgänger-Ablauf läuft (gleiches Tor nicht stören)
         self._locks = {}
+        self._sent = {}                        # Ausgang → Zeit des letzten Hub-Impulses (eigene Impulse beim Mitlesen ignorieren)
 
     # ---- Einstellung
     def load(self):
@@ -106,11 +107,42 @@ class SmartGates:
         for g in self.gates().values():
             role = "open" if did == g["open"] else "step" if did == g["step"] else None
             if role:
+                self._sent[did] = time.time()
                 m = self.model(g)
                 m.observe(role, by)
                 print(f"[TOR] {g['name']}: Impuls {role} → geschätzt {gate_ped._fmt(m.estimate())}", flush=True)
                 return True
         return False
+
+    # ---- Wandtaster / LUXOR-Szenen mitlesen (7.11.: Status-Datenpunkt geht pro Druck ~0,5–1 s auf an)
+    def watch(self, read_fn, interval=0.25, own_window=3.0):
+        """read_fn(device_id) → True/False/None (StatusOnOff). Jede steigende Flanke an einem Tor-Ausgang, die nicht
+        von einem Hub-Impuls kommt, ist ein Tastendruck am Haus → Schätzung nachführen. Den Handsender sieht man so nicht."""
+        def loop():
+            prev = {}
+            while True:
+                try:
+                    for g in self.gates().values():
+                        for role in ("open", "step"):
+                            did = g[role]
+                            on = read_fn(did)
+                            if on is True and prev.get(did) is False:
+                                if time.time() - self._sent.get(did, 0) > own_window:
+                                    m = self.model(g)
+                                    m.observe(role, "Taster")
+                                    print(f"[TOR] {g['name']}: Taster {role} → geschätzt {gate_ped._fmt(m.estimate())}",
+                                          flush=True)
+                            if on is not None:
+                                prev[did] = on
+                except Exception as e:
+                    print(f"[TOR] Taster mitlesen: {e}", flush=True)
+                    time.sleep(5)
+                time.sleep(interval)
+        threading.Thread(target=loop, daemon=True).start()
+
+    def note_sent(self, did):
+        """Der Hub schickt gleich selbst einen Impuls an did (vor dem Schreiben aufrufen)."""
+        self._sent[did] = time.time()
 
     def forget_all(self):
         for g in self.gates().values():

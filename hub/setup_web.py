@@ -358,6 +358,7 @@ def attach(app, ctx):
                 + (f'<div class=card><h2>Home Assistant</h2>{hass}</div>' if b == "homeassistant" else "")
                 + (_shelly_card(c, csrf) if b == "shelly" else "")
                 + _doorbird_card(c, csrf)
+                + _judo_card(c, csrf)
                 + names)
         return _page("Geräte", body, "haus", csrf)
 
@@ -405,6 +406,48 @@ def attach(app, ctx):
         e = await asyncio.to_thread(CTX["doorbird"].ring, True)
         return _done(request.state.tok, "haus", True,
                      "Probe-Klingeln geschickt" + (" mit Bild." if e and e.get("image") else " – aber ohne Bild (Recht „Live-Bild“ fehlt?)."))
+
+    def _judo_card(c, csrf):
+        j = CTX.get("judo")
+        if j is None:
+            return ""
+        d = c.get("judo") or {}
+        steps = ('<p class=muted>Wasserverbrauch, Salzvorrat und Wasser absperren (i-safe) in der App. '
+                 'Das JUDO Connectivity-Modul muss im WLAN/LAN sein (Einrichtung über sein WLAN „Judo Connectivity“, '
+                 'http://192.168.4.1). Am besten in der FRITZ!Box eine feste IP vergeben. '
+                 'Ab Werk: Benutzer <b>admin</b>, Passwort <b>Connectivity</b>.</p>')
+        form = _form("/setup/judo/save",
+                     '<div class=row><div>' + _field("host", "Adresse des Moduls", d.get("host"), placeholder="z. B. 192.168.178.60")
+                     + '</div><div>' + _field("user", "Benutzer", d.get("user") or "admin") + '</div></div>'
+                     + _field("password", "Passwort", "", "password",
+                              "gespeichert – leer lassen = unverändert" if d.get("password") else "leer = Werkseinstellung"),
+                     csrf, "Speichern & testen")
+        st = ""
+        if j.configured:
+            info = j.info or {}
+            st = (f'<p class=ok>✓ verbunden: {E(info.get("type") or "JUDO")} Nr. {E(info.get("number") or "?")}, '
+                  f'Software {E(info.get("version") or "?")}</p>' if j.connected
+                  else f'<p class=bad>{E(j.error or "verbindet …")}</p>')
+        return f'<div class=card><h2>Wasser (JUDO-Enthärtung)</h2>{steps}{form}{st}</div>'
+
+    @app.post("/setup/judo/save")
+    async def judo_save(request: Request):
+        import asyncio
+        f = await request.form()
+        ch = {"host": (f.get("host") or "").strip().replace("http://", "").rstrip("/"),
+              "user": (f.get("user") or "admin").strip()}
+        if (f.get("password") or "").strip():
+            ch["password"] = f.get("password").strip()
+        hub_config.update({"judo": ch})
+        if not ch["host"]:
+            return _done(request.state.tok, "haus", True, "JUDO ausgeschaltet.")
+        try:
+            info = await asyncio.to_thread(CTX["judo"].test)
+            return _done(request.state.tok, "haus", True,
+                         f"JUDO verbunden: {info.get('type')} Nr. {info.get('number')}.")
+        except Exception as e:
+            CTX["judo"].error = str(e)[:160]
+            return _done(request.state.tok, "haus", False, f"JUDO: {e}")
 
     @app.post("/setup/save/backend")
     async def save_backend(request: Request):

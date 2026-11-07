@@ -20,6 +20,8 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
   GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test – Türklingel (DoorBird)
+  GET  /api/water · POST /api/water/valve {"open"} · /api/water/vacation {"on"} · /api/water/regenerate – Enthärtung (JUDO)
+  GET  /api/water/summary?period=day|month|year&date= · GET/PUT /api/water/prices (€/m³ Wasser, Abwasser, Grundgebühr/Jahr)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import json
@@ -263,8 +265,10 @@ def _wrap_pedestrian(obj):
             except RuntimeError as e:
                 raise RuntimeError(str(e))
         if did != PED_ID:
-            res = orig_cmd(did, cmd)
             ped, sg = globals().get("pedestrian"), globals().get("smart_gates")
+            if sg is not None and cmd.get("trigger"):
+                sg.note_sent(did)                     # eigener Impuls – beim Taster-Mitlesen nicht doppelt zählen
+            res = orig_cmd(did, cmd)
             if ped is not None and cmd.get("trigger"):
                 try:                                  # Torstellung schätzen (gate_ped.GateModel)
                     if not (sg is not None and sg.observe(did)):
@@ -1250,6 +1254,7 @@ import gate_smart as _gate_smart  # noqa: E402
 smart_gates = _gate_smart.SmartGates(
     lambda did, cmd: need_home().command(did, cmd),
     busy_fn=lambda g: pedestrian.busy() and pedestrian.load()["devices"].get("open") == g["open"])
+smart_gates.watch(_read_on)                         # Wandtaster am Tor → Torstellung nachführen
 
 
 def _seed_gate_scenes():
@@ -2478,9 +2483,89 @@ def doorbird_test(p=Depends(person)):
     return doorbird.ring(test=True, only=[p["id"]])
 
 
+
+# ---------------------------------------------------------------- Wasser (JUDO-Enthärtung, i-safe Leckageschutz)
+import judo as _judo  # noqa: E402
+
+judo = _judo.Judo(lambda: hub_config.get("judo") or {}, push)
+
+
+class WaterValve(BaseModel):
+    open: bool
+
+
+class WaterVacation(BaseModel):
+    on: bool
+
+
+def _judo_call(fn, *a):
+    if not judo.configured:
+        raise HTTPException(status_code=400, detail="Die Enthärtung ist nicht eingerichtet")
+    try:
+        return fn(*a)
+    except _judo.JudoError as e:
+        raise HTTPException(status_code=502, detail=f"JUDO: {e}")
+
+
+@app.get("/api/water")
+def water_state(p=Depends(person)):
+    return judo.state()
+
+
+@app.post("/api/water/valve")
+def water_valve(body: WaterValve, p=Depends(can_edit)):
+    """Wasser auf/zu (i-safe Leckageschutz). Gäste dürfen nicht."""
+    print(f"[JUDO] Wasser {'AUF' if body.open else 'ZU'} durch {p.get('name')}", flush=True)
+    return _judo_call(judo.set_valve, body.open)
+
+
+@app.post("/api/water/vacation")
+def water_vacation(body: WaterVacation, p=Depends(can_edit)):
+    return _judo_call(judo.set_vacation, body.on)
+
+
+def _water_prices():
+    return (hub_config.get("judo") or {}).get("prices") or {}
+
+
+class WaterPrices(BaseModel):
+    water: float | None = None       # €/m³ Frischwasser
+    sewage: float | None = None      # €/m³ Abwasser (Schmutzwasser)
+    base_year: float | None = None   # €/Jahr Grundgebühren (Zähler, Abwasser-Grundgebühr …)
+
+
+@app.get("/api/water/summary")
+def water_summary(period: str = "day", date: str | None = None, p=Depends(person)):
+    """Verbrauch je Stunde (Tag), je Tag (Monat) oder je Monat (Jahr). Kosten nur für Besitzer + Vollzugriff."""
+    try:
+        return judo.summary(period, date, _water_prices() if p["role"] in ("owner", "full") else None)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültiges Datum")
+
+
+@app.get("/api/water/prices")
+def water_prices(p=Depends(can_edit)):
+    return _water_prices()
+
+
+@app.put("/api/water/prices")
+def water_prices_set(body: WaterPrices, p=Depends(can_edit)):
+    vals = body.model_dump()
+    for k, v in vals.items():
+        if v is not None and not (0 <= v <= 100000):
+            raise HTTPException(status_code=400, detail="Preis außerhalb des Bereichs")
+    hub_config.update({"judo": {"prices": vals}})
+    return _water_prices()
+
+
+@app.post("/api/water/regenerate")
+def water_regenerate(p=Depends(can_edit)):
+    return _judo_call(judo.regenerate)
+
+
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
-                           "nightheat": nightheat, "doorbird": doorbird,
+                           "nightheat": nightheat, "doorbird": doorbird, "judo": judo,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 

@@ -8,7 +8,8 @@ Abos je Person: washer (Wäsche/Spülen fertig), car (Auto voll/eingesteckt), we
 wx_alert / wx_rain / wx_gust (Wetter: DWD-Warnung, Regen in Kürze, Sturmböen – forecast.py),
 solar (Sonnenstrom übrig), monthly (Monatsbericht), cheap (Billigstrom, nur dynamischer Tarif),
 wx_frost (Frost), garden (Gieß-Hinweis), maint (Wartung fällig – maintenance.py),
-door (Es klingelt – DoorBird, mit Bild: doorbird.py).
+door (Es klingelt – DoorBird, mit Bild: doorbird.py),
+water (Enthärtung: Salz nachfüllen, Wasser läuft seit Stunden – judo.py).
 """
 import base64
 import json
@@ -20,7 +21,7 @@ from hub_config import DATA_DIR
 
 KEY_FILE = os.path.join(DATA_DIR, "apns.p8")
 DEV_FILE = os.path.join(DATA_DIR, "push.json")
-TOPICS = ("washer", "car", "weekly", "smart", "wx_alert", "wx_rain", "wx_gust", "vacuum", "mower", "solar", "monthly", "cheap", "wx_frost", "garden", "maint", "door")
+TOPICS = ("washer", "car", "weekly", "smart", "wx_alert", "wx_rain", "wx_gust", "vacuum", "mower", "solar", "monthly", "cheap", "wx_frost", "garden", "maint", "door", "water")
 BUNDLE = "biz.liesenberg.home"
 
 

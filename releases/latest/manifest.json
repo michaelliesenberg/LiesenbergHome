@@ -1,9 +1,10 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.49.0",
- "file": "hub-2.49.0.tar.gz",
- "sha256": "0d243db552c8ddee349f2fa82ede9474e3a1ba40af8753be127e2b995f6c3dd3",
+ "version": "2.50.0",
+ "file": "hub-2.50.0.tar.gz",
+ "sha256": "9025d340154aedf13c627e3b3a7fe6701efd84de426872a668a547ee474af758",
  "files": [
+  "VERSION",
   "appliance_learn.py",
   "caddy-https.sh",
   "consumers.py",
@@ -23,6 +24,7 @@
   "hubctl",
   "i18n.py",
   "install.sh",
+  "judo.py",
   "lgthinq.py",
   "liesenberg-home.service",
   "liveactivity.py",
@@ -47,9 +49,8 @@
   "sunbuffer.py",
   "updater.py",
   "vacation.py",
-  "vacuum_schedule.py",
-  "VERSION"
+  "vacuum_schedule.py"
  ],
- "notes": "DoorBird-Klingel mit Bild",
- "created": 1793881443
+ "notes": "JUDO-Enth\u00e4rtungsanlage: Wasserverbrauch Tag/Monat/Jahr und Kosten. Tor: Der Hub liest die Tor-Taster am Haus mit und f\u00fchrt die Torstellung auch bei Tastendr\u00fccken nach (Handsender weiterhin nicht sichtbar).",
+ "created": 1794036526
 }
