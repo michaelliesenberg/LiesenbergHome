@@ -380,7 +380,93 @@ def attach(app, ctx):
             st = (f'<p class=ok>✓ verbunden mit {E(d.get("host") or "")} – wartet aufs Klingeln</p>' if db.connected
                   else f'<p class=bad>{E(db.error or "verbindet …")}</p>')
             st += _form("/setup/doorbird/test", "", csrf, "Probe-Klingeln (Push an alle mit Abo „Klingel“)")
-        return f'<div class=card><h2>Türklingel (DoorBird)</h2>{steps}{form}{st}</div>'
+        return f'<div class=card><h2>Türklingel (DoorBird)</h2>{steps}{form}{st}{_chime_part(csrf)}</div>'
+
+    def _chime_part(csrf):
+        ch = CTX.get("chime")
+        if ch is None:
+            return ""
+        if not ch.available:
+            return '<h3>Gong auf den HomePods</h3><p class=bad>Musik-Anbindung (pyatv) nicht verfügbar – kein Gong möglich.</p>'
+        import doorbell_chime
+        from datetime import datetime
+        s = ch.settings()
+        excl = set(s["exclude"] or [])
+        m = CTX.get("music")
+        spk = m.speakers() if m is not None else []
+        boxes = "".join(f'<label style="display:inline-flex;gap:4px;margin-right:12px"><input style="width:auto" type=checkbox '
+                        f'name="spk::{E(x["id"])}" value=1 {"" if x["id"] in excl else "checked"}>{E(x["name"])}</label>'
+                        for x in spk) or '<span class=muted>Noch keine Lautsprecher gefunden (Musik-Seite in der App einmal öffnen).</span>'
+        rep = "".join(f'<option value={n} {"selected" if int(s["repeat"] or 2) == n else ""}>{n}×</option>' for n in (1, 2, 3))
+        nv = "" if s["night_volume"] is None else s["night_volume"]
+        inner = (f'<label style="display:flex;gap:6px;align-items:center"><input style="width:auto" type=checkbox name=enabled value=1 '
+                 f'{"checked" if s["enabled"] else ""}>Beim Klingeln „Ding-Dong“ auf den HomePods spielen</label>'
+                 '<div class=row><div>' + _field("volume", "Lautstärke (0–100)", s["volume"], "number")
+                 + '</div><div><label>Wie oft</label><select name=repeat>' + rep + '</select></div></div>'
+                 '<div class=row><div>' + _field("night_volume", "Lautstärke nachts", nv, "number", "leer = wie tagsüber",
+                                                 "0 = nachts kein Gong (nur Push)")
+                 + '</div><div>' + _field("night_from", "Nacht von", s["night_from"], placeholder="22:00")
+                 + '</div><div>' + _field("night_to", "bis", s["night_to"], placeholder="07:00") + '</div></div>'
+                 f'<label>Diese Lautsprecher klingeln</label><div style="margin:6px 0 10px">{boxes}</div>')
+        last = ""
+        if ch.last:
+            res = ", ".join(f'{E(k)}: {"✓" if v == "ok" else E(v)}' for k, v in ch.last["speakers"].items()) or "keine Lautsprecher"
+            last = f'<p class=muted>Zuletzt ({datetime.fromtimestamp(ch.last["ts"]).strftime("%d.%m. %H:%M")}, Lautstärke {ch.last["volume"]}): {res}</p>'
+        jetzt = doorbell_chime.volume_now(s)
+        return ('<h3>Gong auf den HomePods</h3><p class=muted>Klingelt es, spielt der Hub sofort einen Gong auf allen HomePods '
+                '(AirPlay). Läuft gerade Musik, wird sie kurz unterbrochen, danach geht die Lautstärke zurück. '
+                'Am HomePod muss in der Home-App „Zugriff auf Lautsprecher und TV: Alle im selben Netzwerk“ erlaubt sein. '
+                f'Jetzt gilt Lautstärke {jetzt}.</p>'
+                + _form("/setup/doorbird/chime", inner, csrf) + last
+                + _form("/setup/doorbird/chime/test", "", csrf, "Gong testen"))
+
+    @app.post("/setup/doorbird/chime")
+    async def doorbird_chime_save(request: Request):
+        f = await request.form()
+
+        def num(k, default, empty=None):
+            v = (f.get(k) or "").strip()
+            if v == "":
+                return empty
+            try:
+                return max(0, min(100, int(float(v))))
+            except ValueError:
+                return default
+
+        def hm(k, default):
+            v = (f.get(k) or "").strip()
+            try:
+                h, mi = v.split(":")
+                return f"{int(h) % 24:02d}:{int(mi) % 60:02d}"
+            except ValueError:
+                return default
+
+        m = CTX.get("music")
+        known = [x["id"] for x in m.speakers()] if m is not None else []
+        old = CTX["chime"].settings()
+        # Lautsprecher, die gerade nicht gefunden wurden, behalten ihre alte Einstellung
+        excl = [i for i in known if not f.get(f"spk::{i}")] + [i for i in old["exclude"] or [] if i not in known]
+        hub_config.update({"doorbird": {"chime": {
+            "enabled": bool(f.get("enabled")), "volume": num("volume", old["volume"], old["volume"]),
+            "night_volume": num("night_volume", old["night_volume"]), "repeat": num("repeat", 2, 2) or 1,
+            "night_from": hm("night_from", old["night_from"]), "night_to": hm("night_to", old["night_to"]),
+            "exclude": excl}}})
+        return _done(request.state.tok, "haus", True, "Gong-Einstellungen gespeichert.")
+
+    @app.post("/setup/doorbird/chime/test")
+    async def doorbird_chime_test(request: Request):
+        import asyncio
+        try:
+            r = await asyncio.to_thread(CTX["chime"].ring, True)
+        except Exception as e:
+            return _done(request.state.tok, "haus", False, f"Gong: {e}")
+        if not r or not r["speakers"]:
+            return _done(request.state.tok, "haus", False, "Kein Lautsprecher gefunden oder alle abgewählt.")
+        bad = {k: v for k, v in r["speakers"].items() if v != "ok"}
+        if bad:
+            return _done(request.state.tok, "haus", False,
+                         "Gong gespielt, aber nicht überall: " + ", ".join(f"{k} ({v})" for k, v in bad.items()))
+        return _done(request.state.tok, "haus", True, f"Gong auf {len(r['speakers'])} Lautsprechern gespielt.")
 
     @app.post("/setup/doorbird/save")
     async def doorbird_save(request: Request):

@@ -7,6 +7,12 @@ Gesteuert wird dann möglichst lokal im WLAN; die Bibliothek fällt automatisch 
 
 Mitteilungen (Abo „vacuum"): Reinigung fertig, Roboter steckt fest/Fehler, Frischwasser leer, Schmutzwasser voll,
 Station-Fehler. Optional: „Saugen, wenn alle weg sind" (aus, bis der Besitzer es einschaltet).
+
+Wassertanks der Station (ab Hub 2.51): Roborock meldet nur „Frischwasser leer" und „Schmutzwasser voll/fehlt"
+(Bits im Feld dss), keinen Füllstand. Darum merkt sich der Hub zusätzlich, wann zuletzt gewischt wurde (Mopp-Wäsche
+an der Station = Schmutzwasser im Tank) und erinnert nach 3 Tagen ans Leeren und Ausspülen, bevor es riecht – auch
+wenn der Tank noch nicht voll ist. Zurückgesetzt wird das, wenn der Schmutzwassertank herausgenommen und wieder
+eingesetzt wurde (Station meldet kurz „fehlt", dann wieder ok) oder wenn jemand in der App „Geleert" tippt.
 """
 import asyncio
 import json
@@ -19,6 +25,11 @@ from datetime import datetime
 from hub_config import DATA_DIR
 
 STATE_FILE = os.path.join(DATA_DIR, "roborock.json")
+DIRTY_DAYS = 3            # Schmutzwasser spätestens nach so vielen Tagen leeren (roborock.json: "dirty_days")
+TANK_DEBOUNCE = 180       # s – Tank kurz draußen zum Auffüllen/Leeren ist kein Alarm
+WEEKDAY_DE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+MOP_WASH_STATES = {"washing_the_mop", "going_to_wash_the_mop"}
+TANK_DOCK_ERRORS = {"water_empty", "waste_water_tank_full", "dirty_tank_latch_open"}
 CACHE_FILE = os.path.join(DATA_DIR, "roborock-cache.pkl")
 
 STATE_DE = {
@@ -79,6 +90,7 @@ class Vacuum:
         self._pending = None       # (email, api client) zwischen „Code anfordern" und „Code eingeben"
         self._prev = {}            # duid → letzter Zustand (für Mitteilungen)
         self._last_full = {}       # duid → Zeitpunkt der letzten vollständigen Abfrage (Räume, Verbrauchsteile)
+        self._tankmem = {}         # duid → flüchtige Tank-Zustände (seit wann leer/voll, schon gemeldet)
         self.state = self._load()
         if self.state.get("user_data"):
             self._run(self._connect(), timeout=None, wait=False)
@@ -190,6 +202,7 @@ class Vacuum:
             err = _name(s.error_code)
             dock_err = _name(getattr(s, "dock_error_status", None))
             st.update(
+                dockErrorCode=dock_err,
                 name=dev.name, model=getattr(dev.product, "model", None), online=True,
                 local=bool(getattr(dev, "is_local_connected", False)),
                 state=state, stateText=STATE_DE.get(state or "", (state or "–").replace("_", " ")),
@@ -206,6 +219,7 @@ class Vacuum:
                 waterOptions=[{"id": n, "text": WATER_DE.get(n, n)} for n in s.water_mode_mapping.values()],
                 dock=_name(getattr(s, "dock_type", None)),
                 updated=int(time.time()))
+            self._tanks(duid, st, s, dock_err)
             if full or time.time() - self._last_full.get(duid, 0) > 600:
                 self._last_full[duid] = time.time()
                 try:
@@ -407,6 +421,11 @@ class Vacuum:
         return out
 
     def command(self, duid, action, value=None):
+        if action == "tank_emptied":              # nur im Hub: „Schmutzwasser geleert" aus der App
+            if duid not in self.status:
+                raise KeyError(duid)
+            self.tank_emptied(duid)
+            return
         if duid not in self.devices:
             raise KeyError(duid)
         self._run(self._command(duid, action, value))
@@ -415,6 +434,102 @@ class Vacuum:
     def set_auto_away(self, on):
         self.state["auto_away"] = bool(on)
         self._save()
+
+    # ---------------------------------------------------------- Wassertanks (Frischwasser / Schmutzwasser)
+    def _tanks(self, duid, st, s, dock_err):
+        """Tank-Zustand aus dem Status lesen, Wischen erkennen, Leeren erkennen. Läuft bei jeder Abfrage."""
+        now = time.time()
+        dss = getattr(s, "dss", None)
+        clean = _name(getattr(s, "clear_water_box_status", None)) if dss else None
+        dirty = _name(getattr(s, "dirty_water_box_status", None)) if dss else None
+        st["cleanWaterEmpty"] = bool(st.get("waterShortage") or dock_err == "water_empty"
+                                     or clean not in (None, "okay"))
+        st["dirtyWaterFull"] = bool(dock_err in ("waste_water_tank_full", "dirty_tank_latch_open")
+                                    or dirty not in (None, "okay"))
+        mem = self._tankmem.setdefault(duid, {})
+        t = self.state.setdefault("tanks", {}).setdefault(duid, {})
+        changed = False
+        # Schmutzwassertank war draußen (oder voll gemeldet) und ist wieder ok → geleert
+        if st["dirtyWaterFull"]:
+            mem.setdefault("dirtyBadAt", now)
+        elif mem.pop("dirtyBadAt", None) is not None and t.get("since"):
+            print(f"[ROBOROCK] {st.get('name')}: Schmutzwassertank wurde geleert", flush=True)
+            t.pop("since", None); t.pop("reminded", None)
+            changed = True
+        mem["cleanBadAt"] = (mem.get("cleanBadAt") or now) if st["cleanWaterEmpty"] else None
+        # gewischt? Mopp-Wäsche an der Station oder Reinigung mit Wasser und eingesetztem Wischmodul
+        state = st.get("state")
+        mopping = (state in MOP_WASH_STATES or bool(getattr(s, "wash_phase", 0))
+                   or (st.get("cleaning") and (st.get("water") or "off") != "off"
+                       and getattr(s, "water_box_carriage_status", 0) == 1))
+        if mopping and not t.get("since"):
+            t["since"] = int(now)
+            changed = True
+        if mopping:
+            t["last"] = int(now)
+        if changed:
+            self._save()
+        self._tank_view(duid, st)
+
+    def _tank_view(self, duid, st):
+        """Felder + Hinweise (Banner in der App) aus dem gemerkten Zustand"""
+        t = (self.state.get("tanks") or {}).get(duid) or {}
+        days = float(self.state.get("dirty_days", DIRTY_DAYS))
+        since = t.get("since")
+        due = int(since + days * 86400) if since else None
+        st.update(dirtySince=since, dirtyDue=due, dirtyOverdue=bool(due and time.time() >= due))
+        name = st.get("name") or "Saugroboter"
+        notices = []
+        if st.get("cleanWaterEmpty"):
+            notices.append({"id": "clean", "icon": "drop.fill", "title": "Frischwasser auffüllen",
+                            "text": f"{name}: Der Frischwassertank der Station ist leer."})
+        if st.get("dirtyWaterFull"):
+            notices.append({"id": "dirty_full", "icon": "exclamationmark.triangle.fill", "title": "Schmutzwasser leeren",
+                            "text": f"{name}: Der Schmutzwassertank ist voll oder nicht richtig eingesetzt.",
+                            "action": "tank_emptied"})
+        elif st["dirtyOverdue"]:
+            notices.append({"id": "dirty_due", "icon": "clock.badge.exclamationmark", "title": "Schmutzwasser leeren",
+                            "text": f"{name}: Schmutzwasser steht seit {self._since_text(since)} im Tank. Bitte leeren "
+                                    "und ausspülen, bevor es riecht.",
+                            "action": "tank_emptied"})
+        st["notices"] = notices
+
+    @staticmethod
+    def _since_text(ts):
+        d = datetime.fromtimestamp(ts)
+        return f"{WEEKDAY_DE[d.weekday()]}, {d.day}.{d.month}."
+
+    def _tank_push(self, duid, st):
+        """Mitteilungen: Frischwasser leer / Schmutzwasser voll (je einmal, nach 3 Min. Bestand),
+        3-Tage-Erinnerung (dann täglich, nur 8–21 Uhr)"""
+        now = time.time()
+        mem = self._tankmem.setdefault(duid, {})
+        name = st.get("name") or "Saugroboter"
+        for key, bad_at in (("clean", mem.get("cleanBadAt")), ("dirty", mem.get("dirtyBadAt"))):
+            if not bad_at:
+                mem.pop(key + "Sent", None)
+            elif now - bad_at >= TANK_DEBOUNCE and not mem.get(key + "Sent"):
+                mem[key + "Sent"] = True
+                if key == "clean":
+                    self._send("🚰 Frischwasser leer", f"{name}: bitte den Frischwassertank der Station auffüllen.")
+                else:
+                    self._send("🪣 Schmutzwasser voll", f"{name}: bitte den Schmutzwassertank leeren und ausspülen.")
+        t = (self.state.get("tanks") or {}).get(duid) or {}
+        if (st.get("dirtyOverdue") and not st.get("dirtyWaterFull") and 8 <= datetime.now().hour < 21
+                and now - t.get("reminded", 0) >= 86400 - 900):
+            t["reminded"] = int(now)
+            self._save()
+            self._send("🪣 Schmutzwasser leeren",
+                       f"{name}: Schmutzwasser steht seit {self._since_text(t['since'])} im Tank – bitte leeren und "
+                       "ausspülen, sonst fängt es an zu riechen.")
+
+    def tank_emptied(self, duid):
+        t = self.state.setdefault("tanks", {}).setdefault(duid, {})
+        t.pop("since", None); t.pop("reminded", None)
+        self._save()
+        st = self.status.get(duid)
+        if st is not None:
+            self._tank_view(duid, st)
 
     # ---------------------------------------------------------- Hintergrund + Mitteilungen
     def _poller(self):
@@ -444,10 +559,10 @@ class Vacuum:
             self._send(f"🧹 {name} ist fertig", (f"{area:.0f} m² in {st.get('cleanMinutes')} min" if area else "Zurück in der Station"))
         if st.get("error") and st.get("error") != prev.get("error"):
             self._send(f"⚠️ {name} braucht Hilfe", st["error"])
-        if st.get("dockError") and st.get("dockError") != prev.get("dockError"):
+        if (st.get("dockError") and st.get("dockError") != prev.get("dockError")
+                and st.get("dockErrorCode") not in TANK_DOCK_ERRORS):          # Tanks: entprellt in _tank_push
             self._send(f"🚰 Station: {st['dockError']}", "Bitte an der Station nachsehen.")
-        if st.get("waterShortage") and not prev.get("waterShortage"):
-            self._send("🚰 Frischwasser leer", f"{name}: bitte den Frischwassertank auffüllen.")
+        self._tank_push(duid, st)
 
     def on_presence(self, all_away):
         """Vom Hub aufgerufen, wenn sich die Anwesenheit ändert. Startet höchstens einmal am Tag."""

@@ -37,6 +37,7 @@ class DoorBird:
         self.error = None
         self.info = {}
         self.on_ring = None            # optional: weitere Aktion beim Klingeln (z. B. Licht)
+        self.on_ring_start = None      # optional: sofort beim Klingeln, vor Bild und Push (Türgong auf den HomePods)
         self._last_ring = 0
         self._last_scan = 0
         self._fails = 0
@@ -120,6 +121,11 @@ class DoorBird:
             if now - self._last_ring < DEBOUNCE:
                 return None
             self._last_ring = now
+            if self.on_ring_start:
+                try:
+                    self.on_ring_start()
+                except Exception as e:
+                    print(f"[DOORBIRD] on_ring_start: {e}", flush=True)
         rid = str(int(now * 1000))
         img = self.snapshot()
         if img is None:                    # das erste Bild kommt manchmal zu früh – kurz nachfassen

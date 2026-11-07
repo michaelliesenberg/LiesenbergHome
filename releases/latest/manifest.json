@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.50.0",
- "file": "hub-2.50.0.tar.gz",
- "sha256": "9025d340154aedf13c627e3b3a7fe6701efd84de426872a668a547ee474af758",
+ "version": "2.52.0",
+ "file": "hub-2.52.0.tar.gz",
+ "sha256": "a8b115bd9bba01b93178ab5139db27c09845f2a01ac5826166281eedf369385e",
  "files": [
   "VERSION",
   "appliance_learn.py",
@@ -10,6 +10,7 @@
   "consumers.py",
   "daikin.py",
   "devices.py",
+  "doorbell_chime.py",
   "doorbird.py",
   "energy_log.py",
   "forecast.py",
@@ -51,6 +52,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "JUDO-Enth\u00e4rtungsanlage: Wasserverbrauch Tag/Monat/Jahr und Kosten. Tor: Der Hub liest die Tor-Taster am Haus mit und f\u00fchrt die Torstellung auch bei Tastendr\u00fccken nach (Handsender weiterhin nicht sichtbar).",
- "created": 1794036526
+ "notes": "Saros-Wassertanks, HomePod-T\u00fcrgong",
+ "created": 1794058462
 }

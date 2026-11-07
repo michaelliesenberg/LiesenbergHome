@@ -153,6 +153,70 @@ class Music:
             self._run(self._command(did, action, value))
         self.loop.call_later(1.5, lambda: asyncio.ensure_future(self._refresh_one(did)))
 
+    # ---------------------------------------------------------- Türgong (doorbell_chime.py)
+    async def _chime_one(self, did, path, volume):
+        atv = await self._conn(did)
+        was_playing = False
+        try:
+            p = await asyncio.wait_for(atv.metadata.playing(), 3)
+            was_playing = p.device_state == DeviceState.Playing
+        except Exception:
+            pass
+        try:
+            old = atv.audio.volume
+        except Exception:
+            old = None
+        try:
+            await atv.audio.set_volume(float(volume))
+        except Exception:
+            pass                                # RAOP übernimmt die Lautstärke dann beim Streamen
+        try:
+            await asyncio.wait_for(atv.stream.stream_file(path), 25)
+        finally:
+            if old is not None:
+                try:
+                    await atv.audio.set_volume(float(old))
+                except Exception:
+                    pass
+            if was_playing:
+                try:
+                    await atv.remote_control.play()
+                except Exception:
+                    pass
+
+    async def _chime_all(self, path, volume, ids):
+        async def one(did):
+            try:
+                await self._chime_one(did, path, volume)
+                return "ok"
+            except Exception as e:              # Verbindung alt → neu aufbauen, einmal wiederholen
+                await self._drop(did)
+                try:
+                    await self._chime_one(did, path, volume)
+                    return "ok"
+                except Exception as e2:
+                    await self._drop(did)
+                    return (str(e2) or type(e2).__name__ or str(e))[:80]
+        res = await asyncio.gather(*(one(d) for d in ids))
+        return dict(zip(ids, res))
+
+    def chime(self, path, volume, exclude=(), only=None):
+        """Gong auf allen (bzw. den gewählten) Lautsprechern gleichzeitig. Liefert {Name: "ok" | Fehler}."""
+        if not self.configs:
+            self._run(self._scan())
+        ids = [d for d in self.configs if d not in set(exclude or ()) and (not only or d in only)]
+        if not ids:
+            return {}
+        res = self._run(self._chime_all(path, volume, ids), timeout=70)
+        for did in ids:
+            self.loop.call_later(2, lambda d=did: asyncio.ensure_future(self._refresh_one(d)))
+        return {(self.status.get(d) or {}).get("name") or d: r for d, r in res.items()}
+
+    def speakers(self):
+        """Bekannte Lautsprecher ohne Netzabfrage (für die Einrichtungsseite)."""
+        return sorted(({"id": d, "name": (self.status.get(d) or {}).get("name") or c.name} for d, c in self.configs.items()),
+                      key=lambda s: s["name"] or "")
+
     # ---------------------------------------------------------- Zeitpläne
     def _load(self):
         try:

@@ -19,7 +19,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
-  GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test – Türklingel (DoorBird)
+  GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test · POST /api/doorbird/chime/test – Türklingel (DoorBird) + Gong auf den HomePods
   GET  /api/water · POST /api/water/valve {"open"} · /api/water/vacation {"on"} · /api/water/regenerate – Enthärtung (JUDO)
   GET  /api/water/summary?period=day|month|year&date= · GET/PUT /api/water/prices (€/m³ Wasser, Abwasser, Grundgebühr/Jahr)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
@@ -2447,6 +2447,12 @@ from fastapi.responses import Response  # noqa: E402
 doorbird = _doorbird.DoorBird(lambda: hub_config.get("doorbird") or {},
                               lambda host: hub_config.update({"doorbird": {"host": host}}), push, lan_ip)
 
+# Türgong: beim Klingeln „Ding-Dong“ auf allen HomePods (doorbell_chime.py, braucht die Musik-Anbindung)
+import doorbell_chime as _chime  # noqa: E402
+
+chime = _chime.Chime(lambda: (hub_config.get("doorbird") or {}).get("chime") or {}, music)
+doorbird.on_ring_start = chime.ring_async
+
 
 def _jpeg(data):
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
@@ -2481,6 +2487,14 @@ def doorbird_test(p=Depends(person)):
     if not doorbird.configured:
         raise HTTPException(status_code=400, detail="DoorBird ist nicht eingerichtet")
     return doorbird.ring(test=True, only=[p["id"]])
+
+
+@app.post("/api/doorbird/chime/test")
+def doorbird_chime_test(p=Depends(can_edit)):
+    """Türgong probehalber auf den HomePods abspielen (auch wenn er ausgeschaltet ist)."""
+    if not chime.available:
+        raise HTTPException(status_code=503, detail=f"Musik nicht verfügbar: {_music_error}")
+    return chime.ring(test=True) or {}
 
 
 
@@ -2565,7 +2579,7 @@ def water_regenerate(p=Depends(can_edit)):
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
-                           "nightheat": nightheat, "doorbird": doorbird, "judo": judo,
+                           "nightheat": nightheat, "doorbird": doorbird, "chime": chime, "music": music, "judo": judo,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 
