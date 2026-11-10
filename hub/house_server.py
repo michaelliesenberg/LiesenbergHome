@@ -2231,24 +2231,86 @@ class ArrivalRules(BaseModel):
     approachBearing: float | None = None
     approachWidth: float = 360     # Standard: voller Kreis (aus jeder Richtung)
     minAwayMeters: float = 500
+    # Ankommen-Tor fürs ganze Haus (Geräte-ID, "" = keins). Wird HIER festgelegt, nicht je iPhone –
+    # so kann kein Handy aus Versehen die Haustür („Door“) oder Start/Stop wählen (10.11.: Jos iPhone öffnete die Door).
+    gate: str | None = None
+
+
+def _default_arrival_gate():
+    """Noch nie festgelegt → „Tor außen öffnen“ (Tor Nord, immer nur AUF – nie Start/Stop)."""
+    sg = globals().get("smart_gates")
+    try:
+        g = (sg.gates() if sg is not None else {}).get("nord") or {}
+        return g.get("open") or ""
+    except Exception:
+        return ""
 
 
 def _arrival_rules():
     try:
         with open(_ARRIVAL_FILE) as f:
-            return ArrivalRules(**json.load(f)).model_dump()
+            raw = json.load(f)
+        r = ArrivalRules(**raw).model_dump()
     except (OSError, ValueError, TypeError):
-        return ArrivalRules().model_dump()
+        raw, r = {}, ArrivalRules().model_dump()
+    if not isinstance(raw, dict) or raw.get("gate") is None:
+        r["gate"] = _default_arrival_gate()
+    return r
+
+
+def _arrival_gate():
+    """(Geräte-ID, Gerät) des Ankommen-Tors – oder (None, None)."""
+    gid = _arrival_rules().get("gate") or ""
+    if not gid:
+        return None, None
+    try:
+        d = devices.device_index(structure()).get(gid)
+    except Exception:
+        d = None
+    if not d or d.get("kind") != "gate":
+        return None, None
+    return gid, d
 
 
 @app.get("/api/arrival/rules")
 def arrival_rules_get(p=Depends(person)):
-    return _arrival_rules()
+    r = _arrival_rules()
+    gid, d = _arrival_gate()
+    r["gate"] = gid or ""
+    r["gateName"] = d["name"] if d else None
+    return r
+
+
+@app.post("/api/arrival/gate")
+def arrival_gate_open(p=Depends(person)):
+    """Beim Ankommen: der Hub öffnet SEIN Ankommen-Tor (die App schickt nur diesen Befehl)."""
+    gid, d = _arrival_gate()
+    if not gid:
+        print(f"[ANKOMMEN] {p['name']}: kein Ankommen-Tor festgelegt – nichts geöffnet", flush=True)
+        raise HTTPException(status_code=404, detail="Kein Ankommen-Tor festgelegt")
+    if not perms(p)["restricted"]:
+        raise HTTPException(status_code=403, detail="Als Gast nicht erlaubt")
+    if pedestrian.busy():
+        raise HTTPException(status_code=409, detail="Fußgänger-Ablauf läuft gerade – bitte warten")
+    try:
+        need_home().command(gid, {"trigger": True})
+    except Exception as e:
+        print(f"[ANKOMMEN] {p['name']}: {d['name']} fehlgeschlagen: {e}", flush=True)
+        raise HTTPException(status_code=502, detail=str(e))
+    print(f"[ANKOMMEN] {p['name']}: {d['name']} geöffnet (Ankommen-Tor vom Hub)", flush=True)
+    return {"ok": True, "gate": gid, "name": d["name"]}
 
 
 @app.put("/api/arrival/rules")
 def arrival_rules_put(body: ArrivalRules, p=Depends(can_edit)):
+    old = _arrival_rules()
     r = body.model_dump()
+    if "gate" not in body.model_fields_set or r["gate"] is None:
+        r["gate"] = old.get("gate") or ""          # ältere Apps schicken kein Tor mit → beibehalten
+    elif r["gate"]:
+        d = devices.device_index(structure()).get(r["gate"])
+        if not d or d.get("kind") != "gate":
+            raise HTTPException(status_code=400, detail="Kein Tor")
     if r["approachBearing"] is not None:
         r["approachBearing"] = float(r["approachBearing"]) % 360
     r["approachWidth"] = min(360.0, max(20.0, float(r["approachWidth"])))

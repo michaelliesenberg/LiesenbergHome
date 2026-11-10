@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.52.0",
- "file": "hub-2.52.0.tar.gz",
- "sha256": "a8b115bd9bba01b93178ab5139db27c09845f2a01ac5826166281eedf369385e",
+ "version": "2.53.0",
+ "file": "hub-2.53.0.tar.gz",
+ "sha256": "af97fdb81de099b6bc4ccbfcac1e443478d689bcc0837cc0b403e5790bff064c",
  "files": [
   "VERSION",
   "appliance_learn.py",
@@ -52,6 +52,6 @@
   "vacation.py",
   "vacuum_schedule.py"
  ],
- "notes": "Saros-Wassertanks, HomePod-T\u00fcrgong",
- "created": 1794058462
+ "notes": "Ankommen: Tor \u00f6ffnet sich beim Heimkommen automatisch (einstellbar in den Ankommen-Regeln)",
+ "created": 1794307691
 }
