@@ -1274,6 +1274,36 @@ def _seed_gate_scenes():
 threading.Thread(target=_seed_gate_scenes, daemon=True).start()
 
 
+# ---------------------------------------------------------------- Windalarm → Tor zu (wind_gate.py)
+import wind_gate as _wind_gate  # noqa: E402
+
+
+def _wind_read(dp):
+    if hub_config.get("backend") != "luxor":
+        return None
+    return luxor.get(dp)
+
+
+wind_gate = _wind_gate.WindGate(
+    smart_gates, _wind_read,
+    lambda title, body: push.send("wx_gust", title, body, aps_extra={"interruption-level": "time-sensitive"}),
+    lambda: hub_config.get("wind_gate") or {})
+wind_gate.loop()
+
+
+@app.get("/api/wind-gate")
+def wind_gate_info(p=Depends(person)):
+    """Windalarm-Tor-Automatik: Alarm, Einstellung, letzter Ablauf."""
+    return wind_gate.info()
+
+
+@app.post("/api/wind-gate/test")
+def wind_gate_test(p=Depends(owner)):
+    """Wie bei Windalarm: Mitteilung + Tor schließen (zum Ausprobieren, nur Besitzer)."""
+    print(f"[WIND] {p['name']}: Test", flush=True)
+    return {"ok": True, "result": wind_gate.trigger(f"Test ({p['name']})")}
+
+
 @app.get("/api/gate/pedestrian")
 def gate_ped_get(p=Depends(person)):
     _need_gate(p)

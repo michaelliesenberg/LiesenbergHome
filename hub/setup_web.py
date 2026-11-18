@@ -520,7 +520,7 @@ def attach(app, ctx):
     async def judo_save(request: Request):
         import asyncio
         f = await request.form()
-        ch = {"host": (f.get("host") or "").strip().replace("http://", "").rstrip("/"),
+        ch = {"host": __import__("judo").clean_host(f.get("host")),
               "user": (f.get("user") or "admin").strip()}
         if (f.get("password") or "").strip():
             ch["password"] = f.get("password").strip()
@@ -530,7 +530,7 @@ def attach(app, ctx):
         try:
             info = await asyncio.to_thread(CTX["judo"].test)
             return _done(request.state.tok, "haus", True,
-                         f"JUDO verbunden: {info.get('type')} Nr. {info.get('number')}.")
+                         f"JUDO verbunden: {info.get('type')}" + (f" Nr. {info['number']}." if info.get("number") else "."))
         except Exception as e:
             CTX["judo"].error = str(e)[:160]
             return _done(request.state.tok, "haus", False, f"JUDO: {e}")

@@ -1,10 +1,9 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.53.0",
- "file": "hub-2.53.0.tar.gz",
- "sha256": "af97fdb81de099b6bc4ccbfcac1e443478d689bcc0837cc0b403e5790bff064c",
+ "version": "2.54.0",
+ "file": "hub-2.54.0.tar.gz",
+ "sha256": "640039822014e4758c2a9c53503170e14b45d2094d535050c7fd81bdfcba20f5",
  "files": [
-  "VERSION",
   "appliance_learn.py",
   "caddy-https.sh",
   "consumers.py",
@@ -50,8 +49,10 @@
   "sunbuffer.py",
   "updater.py",
   "vacation.py",
-  "vacuum_schedule.py"
+  "vacuum_schedule.py",
+  "VERSION",
+  "wind_gate.py"
  ],
- "notes": "Ankommen: Tor \u00f6ffnet sich beim Heimkommen automatisch (einstellbar in den Ankommen-Regeln)",
- "created": 1794307691
+ "notes": "Windalarm schlie\u00dft Tor S\u00fcd; Tor zu wirkt auch bei unbekannter Stellung",
+ "created": 1794993133
 }

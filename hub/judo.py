@@ -45,6 +45,12 @@ DEVICE_TYPES = {0x32: "i-soft", 0x33: "i-soft SAFE+", 0x34: "Softwell P", 0x35: 
                 0x67: "i-soft K SAFE+", 0x68: "ZEWA / PROM-i-SAFE"}
 
 
+def clean_host(h):
+    """Adresse aus dem Formular: Leerzeichen, http://, Schrägstriche und mitkopierte Satzzeichen weg."""
+    h = (h or "").strip().replace("http://", "").replace("https://", "").split("/")[0]
+    return h.strip(" ,;.\t\"'„“")
+
+
 def le(hexstr):
     return int.from_bytes(bytes.fromhex(hexstr), "little")
 
@@ -122,7 +128,7 @@ class Judo:
     # ---- REST
     def _request(self, method, register, expect=True):
         c = self._cfg()
-        host = (c.get("host") or "").strip().replace("http://", "").replace("https://", "").rstrip("/")
+        host = clean_host(c.get("host"))
         if not host:
             raise JudoError("JUDO nicht eingerichtet")
         auth = (c.get("user") or "admin", c.get("password") or "Connectivity")
@@ -150,15 +156,23 @@ class Judo:
         return data
 
     def test(self):
-        """Verbindung prüfen (Einrichtungsseite): Typ, Nummer, Softwarestand."""
-        t = self._request("GET", "FF00")
+        """Verbindung prüfen (Einrichtungsseite): nur der Gerätetyp – eine Anfrage, damit es schnell geht.
+        Nummer und Softwarestand holt die Hintergrund-Abfrage danach (details)."""
+        self._urgent += 1                      # laufende Abfrage gibt den Vortritt
+        try:
+            t = self._request("GET", "FF00")
+        finally:
+            self._urgent -= 1
         code = int(t[:2], 16)
-        num = self._request("GET", "0600")
-        ver = self._request("GET", "0100", expect=False)
-        self.info = {"type": DEVICE_TYPES.get(code, f"JUDO (Typ 0x{code:02X})"), "number": str(le(num)),
-                     "version": parse_version(ver)}
+        self.info = {**self.info, "type": DEVICE_TYPES.get(code, f"JUDO (Typ 0x{code:02X})")}
         self.connected, self.error = True, None
         return self.info
+
+    def details(self):
+        """Gerätenummer und Softwarestand (einmal nach dem Start)."""
+        num = self._read("0600")
+        ver = self._read("0100", expect=False)
+        self.info = {**self.info, "number": str(le(num)), "version": parse_version(ver)}
 
     # ---- Lesen
     def _read(self, register, expect=True):
@@ -377,8 +391,13 @@ class Judo:
                 time.sleep(30)
                 continue
             try:
-                if not self.info:
+                if not self.info.get("type"):
                     self.test()
+                if not self.info.get("number"):
+                    try:
+                        self.details()
+                    except _Skip:
+                        pass
                 self.poll()
             except Exception as e:
                 self.connected = False
