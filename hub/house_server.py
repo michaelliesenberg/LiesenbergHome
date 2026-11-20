@@ -22,6 +22,8 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test · POST /api/doorbird/chime/test – Türklingel (DoorBird) + Gong auf den HomePods
   GET  /api/water · POST /api/water/valve {"open"} · /api/water/vacation {"on"} · /api/water/regenerate – Enthärtung (JUDO)
   GET  /api/water/summary?period=day|month|year&date= · GET/PUT /api/water/prices (€/m³ Wasser, Abwasser, Grundgebühr/Jahr)
+  POST /api/water/lock_ok – Verdacht „Leckageschutz hat abgesperrt“ verwerfen (ab 2.55)
+  GET  /api/attention – „Aktion nötig“-Liste für die Startseite (attention.py, ab 2.55)
 Einrichtung im Browser:  http://<hub>:8080/setup  (nur im Heimnetz)
 """
 import json
@@ -2667,6 +2669,49 @@ def water_prices_set(body: WaterPrices, p=Depends(can_edit)):
 @app.post("/api/water/regenerate")
 def water_regenerate(p=Depends(can_edit)):
     return _judo_call(judo.regenerate)
+
+
+@app.post("/api/water/lock_ok")
+def water_lock_ok(p=Depends(can_edit)):
+    """„Wasser läuft“: Verdacht auf Leckageschutz-Sperre verwerfen (ab Hub 2.55)."""
+    print(f"[JUDO] Sperr-Verdacht verworfen durch {p.get('name')}", flush=True)
+    return judo.lock_ok()
+
+
+# ---------------------------------------------------------------- Aktion nötig (attention.py, ab Hub 2.55)
+import attention as _attention  # noqa: E402
+
+
+def _attention_gates(p):
+    """Windalarm an und ein Tor der Wind-Automatik steht laut Schätzung noch offen (Schließen hat nicht geklappt)."""
+    if not perms(p)["restricted"] or not wind_gate.s.get("alarm"):
+        return []
+    out = []
+    gates = smart_gates.gates()
+    for k in wind_gate.cfg().get("gates", []):
+        g = gates.get(k)
+        if not g:
+            continue
+        est = smart_gates.model(g).estimate()
+        if est.get("known") and est.get("pos") is not None and est["pos"] > 0.01 and est.get("dir") != -1:
+            out.append(_attention.item(
+                f"gate.wind.{k}", "gate", "warning", "wind", f"{g['name']} offen bei Windalarm",
+                "Die Wetterstation meldet Windalarm, das Tor steht aber noch offen.",
+                open="gates", since=wind_gate.s.get("since")))
+    return out
+
+
+@app.get("/api/attention")
+def attention_list(p=Depends(person)):
+    """Alles, was gerade eine Aktion braucht – für die Banner oben auf der Startseite der App."""
+    edit = p["role"] in ("owner", "full")
+    providers = [
+        lambda: _attention.water_items(judo.state(), edit, leak_hours=_judo.LEAK_HOURS),
+        lambda: _attention.vacuum_items(vacuum.list()) if vacuum.configured else [],
+        lambda: _attention.maintenance_items(maintenance.list()),
+        lambda: _attention_gates(p),
+    ]
+    return _attention.collect(providers)
 
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
