@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.55.0",
- "file": "hub-2.55.0.tar.gz",
- "sha256": "bf873f09469ded202b9ef2f8ff22ccfff5d9b84d8a404baf40b669e20941b69b",
+ "version": "2.55.1",
+ "file": "hub-2.55.1.tar.gz",
+ "sha256": "313c227b1e55179082b83bafbf28a48496f66617e5530840ba7a44767c18e76a",
  "files": [
   "VERSION",
   "appliance_learn.py",
@@ -54,6 +54,6 @@
   "vacuum_schedule.py",
   "wind_gate.py"
  ],
- "notes": "Aktion n\u00f6tig: Banner-Liste (GET /api/attention), JUDO erkennt vermutliche Leckageschutz-Sperre aus dem Z\u00e4hler (Mitteilung), schnellere Abfrage solange Wasser l\u00e4uft",
- "created": 1795176912
+ "notes": "Tor S\u00fcd und Nord in Szenen getauscht (S\u00fcd = au\u00dfen, Nord = innen)",
+ "created": 1795179494
 }

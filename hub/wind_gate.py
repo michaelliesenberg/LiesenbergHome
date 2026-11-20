@@ -12,7 +12,7 @@ dieselben, auf die die Jalousien und Markisen mit „Teilnahme Windalarm“ hoch
      beim nächsten Windalarm nicht noch einmal (Handsender sieht der Hub nicht).
 
 Nach dem Windalarm geht das Tor nicht wieder auf. Einstellung in config.json → "wind_gate":
-  {"enabled": true, "gates": ["sued"]}     # sued = Tor innen (Michael 17.11.: nur Süd), nord = Tor außen
+  {"enabled": true, "gates": ["sued"]}     # sued = Tor Süd (Michael 17.11.: nur Süd); seit 20.11. Süd = außen, Nord = innen
 Zustand in DATA_DIR/wind-gate.json.
 """
 import json

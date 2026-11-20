@@ -8,7 +8,8 @@ Jedes Tor hat zwei LUXOR-Impuls-Ausgänge: „öffnen“ (fährt immer auf, bei 
 
 Für Szenen und Siri gibt es je Tor ein Gerät (Typ Tor, nur mit Tor-Recht): gate:<key>:zu.
 „Auf“ braucht es nicht (Michael 31.10.): der „öffnen“-Ausgang wirkt immer richtig.
-Einstellung in gate-smart.json (wird beim ersten Mal aus den LUXOR-Namen „Tor außen/innen öffnen/schließen“ belegt):
+Einstellung in gate-smart.json (wird beim ersten Mal aus den LUXOR-Namen „Tor außen/innen öffnen/schließen“ belegt;
+Michael 20.11.: Süd = außen, Nord = innen):
 
   {"gates": {"sued": {"name": "Tor Süd", "open": "lx:…", "step": "lx:…", "travel": 40}, "nord": {…}},
    "scenes": true}       # Szenen „Tor Süd zu“, „Tor Nord zu“ einmal angelegt
@@ -24,7 +25,28 @@ import gate_ped
 FILE = os.path.join(DATA_DIR, "gate-smart.json")
 PREFIX = "gate:"
 # Welche LUXOR-Tore Süd und Nord sind (Name enthält dieses Wort + „öffnen“/„schließen“)
-SIDES = {"nord": ("Tor Nord", "außen"), "sued": ("Tor Süd", "innen")}     # Michael 2.11.: Nord = außen, Süd = innen
+# Michael 20.11.: in den Szenen waren Süd und Nord vertauscht → Süd = außen, Nord = innen (2.11. war andersherum)
+SIDES = {"nord": ("Tor Nord", "innen"), "sued": ("Tor Süd", "außen")}
+SIDES_VERSION = 2                      # gate-smart.json mit älterer Belegung wird einmal umgetauscht
+
+
+def swap_sides(cfg):
+    """Alte Belegung (Nord = außen) → neue: die LUXOR-Ausgänge von sued und nord tauschen, Namen bleiben.
+    Szenen und Siri zeigen weiter auf gate:sued:zu / gate:nord:zu und fahren damit jetzt das richtige Tor."""
+    gates = cfg.get("gates") or {}
+    old = {k: dict(gates.get(k) or {}) for k in ("sued", "nord")}
+    new = dict(gates)
+    for k, other in (("sued", "nord"), ("nord", "sued")):
+        if not old[other].get("open"):
+            new.pop(k, None)
+            continue
+        g = {kk: vv for kk, vv in old[other].items() if kk != "name"}
+        g["name"] = old[k].get("name") or SIDES[k][0]
+        new[k] = g
+    out = dict(cfg)
+    out["gates"] = new
+    out["sides"] = SIDES_VERSION
+    return out
 
 
 def plan_close(est, travel, stale=gate_ped.STALE):
@@ -64,10 +86,15 @@ class SmartGates:
         except (OSError, ValueError):
             cfg = {}
         cfg.setdefault("gates", {})
+        if cfg["gates"] and cfg.get("sides", 1) < SIDES_VERSION:
+            cfg = swap_sides(cfg)
+            self.save(cfg)
+            print(f"[TOR] Tor Süd/Nord getauscht: {cfg['gates']}", flush=True)
         if not cfg["gates"] and self.struct_fn:
             found = self._detect()
             if found:
                 cfg["gates"] = found
+                cfg["sides"] = SIDES_VERSION
                 self.save(cfg)
                 print(f"[TOR] Tor Süd/Nord aus LUXOR-Namen belegt: {found}", flush=True)
         return cfg

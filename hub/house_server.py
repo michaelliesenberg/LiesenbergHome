@@ -2269,10 +2269,10 @@ class ArrivalRules(BaseModel):
 
 
 def _default_arrival_gate():
-    """Noch nie festgelegt → „Tor außen öffnen“ (Tor Nord, immer nur AUF – nie Start/Stop)."""
+    """Noch nie festgelegt → „Tor außen öffnen“ (Tor Süd seit 20.11., immer nur AUF – nie Start/Stop)."""
     sg = globals().get("smart_gates")
     try:
-        g = (sg.gates() if sg is not None else {}).get("nord") or {}
+        g = (sg.gates() if sg is not None else {}).get("sued") or {}
         return g.get("open") or ""
     except Exception:
         return ""
