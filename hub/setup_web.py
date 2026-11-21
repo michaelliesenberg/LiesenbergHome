@@ -870,7 +870,7 @@ def attach(app, ctx):
         login = _form("/setup/hc/login", "", csrf, "Mit Home Connect anmelden") if c["client_id"] else ""
         ready = '<p class=ok>✓ angemeldet</p>' if CTX["homeconnect"].auth.ready else ""
         return _page("Hausgeräte", _flash(tok) + f'<div class=card><h2>Bosch / Siemens Home Connect</h2>{steps}{form}{status}{login}{ready}</div>'
-                     + _miele_card(csrf) + _lg_card(csrf) + _roborock_card(csrf) + _mammotion_card(csrf), "geraete", csrf)
+                     + _miele_card(csrf) + _lg_card(csrf) + _roborock_card(csrf) + _kobold_card(csrf) + _mammotion_card(csrf), "geraete", csrf)
 
     def _lg_card(csrf):
         lg = CTX.get("lg")
@@ -1037,6 +1037,60 @@ def attach(app, ctx):
                     + _form("/setup/roborock/login", _field("code", "Code aus der E-Mail", "", placeholder="123456"), csrf, "Anmelden"))
         err = f'<p class=bad>{E(v.error)}</p>' if v.error and v.configured else ""
         return f'<div class=card><h2>Roborock Saugroboter</h2>{intro}{body}{err}</div>'
+
+    def _kobold_card(csrf):
+        v = CTX.get("kobold")
+        if v is None:
+            return ""
+        intro = ('<p class=muted>Vorwerk-Kobold-Saugroboter (VR300/VR200, MyKobold-App) steuern: Status, Start/Stopp, Station, '
+                 'Zonen aus der MyKobold-Karte. Anmeldung mit der E-Mail deiner MyKobold-App – Vorwerk schickt dir einen Code '
+                 'per Mail. Kein Passwort nötig; gespeichert werden nur Token und Geräteschlüssel, und zwar nur auf dem Hub.</p>')
+        if v.configured:
+            lst = v.list()
+            devs = "".join(f'<li>{E(d.get("name") or d["id"])} – {E(d.get("stateText") or "")}'
+                           f'{" · " + str(d.get("battery")) + " %" if d.get("battery") is not None else ""}'
+                           f'{" · " + str(len(d.get("rooms") or [])) + " Zonen" if d.get("rooms") else ""}</li>'
+                           for d in lst["devices"])
+            body = (f'<p>Status: <span class=ok>angemeldet</span> als <code>{E(v.state.get("email", ""))}</code></p>'
+                    + (f'<ul>{devs}</ul>' if devs else f'<p class=muted>{E(lst.get("error") or "Suche Geräte …")}</p>')
+                    + _form("/setup/kobold/auto",
+                            f'<label><input type=checkbox name=on value=1 {"checked" if lst["autoAway"] else ""}> '
+                            'Saugen, wenn alle weg sind (höchstens 1× am Tag, 8–20 Uhr, Akku ≥ 50 %)</label>', csrf)
+                    + _form("/setup/kobold/logout", "", csrf, "Vorwerk abmelden").replace("<button>", "<button class=btn2>"))
+        else:
+            body = (_form("/setup/kobold/code", _field("email", "E-Mail der MyKobold-App", v.state.get("email", ""), "email"), csrf, "Code anfordern")
+                    + _form("/setup/kobold/login", _field("code", "Code aus der E-Mail", "", placeholder="123456"), csrf, "Anmelden"))
+        err = f'<p class=bad>{E(v.error)}</p>' if v.error and v.configured else ""
+        return f'<div class=card><h2>Vorwerk Kobold Saugroboter</h2>{intro}{body}{err}</div>'
+
+    @app.post("/setup/kobold/code")
+    async def kobold_code(request: Request):
+        f = await request.form()
+        try:
+            await asyncio.to_thread(CTX["kobold"].request_code, f.get("email") or "")
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, f"Code anfordern fehlgeschlagen: {e}")
+        return _done(request.state.tok, "geraete", True, "Code ist unterwegs – bitte im Postfach nachsehen und unten eingeben.")
+
+    @app.post("/setup/kobold/login")
+    async def kobold_login(request: Request):
+        f = await request.form()
+        try:
+            await asyncio.to_thread(CTX["kobold"].login, f.get("code") or "")
+        except Exception as e:
+            return _done(request.state.tok, "geraete", False, f"Anmeldung fehlgeschlagen: {e}")
+        return _done(request.state.tok, "geraete", True, "Vorwerk angemeldet.")
+
+    @app.post("/setup/kobold/logout")
+    def kobold_logout(request: Request):
+        CTX["kobold"].logout()
+        return _done(request.state.tok, "geraete", True, "Vorwerk abgemeldet – Token und Schlüssel gelöscht.")
+
+    @app.post("/setup/kobold/auto")
+    async def kobold_auto(request: Request):
+        f = await request.form()
+        CTX["kobold"].set_auto_away(bool(f.get("on")))
+        return _done(request.state.tok, "geraete")
 
     @app.post("/setup/roborock/code")
     async def roborock_code(request: Request):

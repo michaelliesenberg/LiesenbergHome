@@ -72,6 +72,12 @@ FAN_DE = {"quiet": "Leise", "balanced": "Normal", "turbo": "Turbo", "max": "Max"
 WATER_DE = {"off": "Aus", "slight": "Sehr wenig", "low": "Niedrig", "mild": "Niedrig", "gentle": "Sanft", "medium": "Mittel",
             "moderate": "Mittel+", "high": "Hoch",
             "intense": "Hoch", "custom": "Individuell", "smart_mode": "Smart", "extreme": "Extrem"}
+# Wischroute (Roborock „mop_mode"): wie dicht der Roboter beim Wischen fährt (Schnell < Standard < Tief < Tief+)
+ROUTE_DE = {"standard": "Standard", "deep": "Tief", "deep_plus": "Tief+", "fast": "Schnell", "smart_mode": "Smart",
+            "custom": "Individuell"}
+# Reinigungsmodus (Saugen / Wischen / beides) – setzt Saugstufe, Wasser und Route zusammen
+MODE_DE = {"vacuum": "Nur saugen", "vac_and_mop": "Saugen + Wischen", "mop": "Nur wischen",
+           "smart_mode": "SmartPlan", "custom": "Individuell (je Raum)"}
 
 
 def _name(v):
@@ -219,6 +225,7 @@ class Vacuum:
                 waterOptions=[{"id": n, "text": WATER_DE.get(n, n)} for n in s.water_mode_mapping.values()],
                 dock=_name(getattr(s, "dock_type", None)),
                 updated=int(time.time()))
+            self._modes(st, s)
             self._tanks(duid, st, s, dock_err)
             if full or time.time() - self._last_full.get(duid, 0) > 600:
                 self._last_full[duid] = time.time()
@@ -243,6 +250,24 @@ class Vacuum:
         except Exception as e:
             st.update(online=False, stateText="nicht erreichbar", error=str(e)[:120])
         self._notify(duid, st)
+
+    @staticmethod
+    def _modes(st, s):
+        """Wischroute + Reinigungsmodus (ab Hub 2.56). Fehlt eins beim Modell, bleiben die Felder leer → App blendet aus."""
+        try:
+            route = getattr(s, "mop_route_name", None)
+            st.update(route=route, routeText=ROUTE_DE.get(route or "", route),
+                      routeOptions=[{"id": n, "text": ROUTE_DE.get(n, n)}
+                                    for n in dict.fromkeys((getattr(s, "mop_route_mapping", None) or {}).values())])
+        except Exception as e:
+            print(f"[ROBOROCK] Wischroute: {e}", flush=True)
+        try:
+            mode = getattr(s, "current_cleaning_mode_name", None)
+            st.update(mode=mode, modeText=MODE_DE.get(mode or "", mode),
+                      modeOptions=[{"id": m.value, "text": MODE_DE.get(m.value, m.value)}
+                                   for m in (getattr(s, "cleaning_mode_options", None) or [])])
+        except Exception as e:
+            print(f"[ROBOROCK] Reinigungsmodus: {e}", flush=True)
 
     def list(self):
         return {"configured": self.configured, "error": self.error, "autoAway": bool(self.state.get("auto_away")),
@@ -290,6 +315,15 @@ class Vacuum:
             if code is None:
                 raise ValueError("Unbekannte Wassermenge")
             await send(C.SET_WATER_BOX_CUSTOM_MODE, [code])
+        elif action == "route":
+            code = next((k for k, v in p.status.mop_route_mapping.items() if v == value), None)
+            if code is None:
+                raise ValueError("Unbekannte Wischroute")
+            await send(C.SET_MOP_MODE, [code])
+        elif action == "mode":
+            if value not in [m.value for m in p.status.cleaning_mode_options]:
+                raise ValueError("Unbekannter Reinigungsmodus")
+            await p.status.set_cleaning_mode(value)
         elif action == "wash":
             await send(C.APP_START_WASH)
         elif action == "empty":

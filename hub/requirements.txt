@@ -8,3 +8,4 @@ httpx[http2]>=0.27
 python-roborock==7.12.1
 pymammotion==0.10.9
 packaging>=23
+pybotvac==0.0.29

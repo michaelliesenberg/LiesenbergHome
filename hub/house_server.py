@@ -1994,8 +1994,12 @@ def car_limit(lp: int, body: CarLimit, p=Depends(can_edit)):
 
 # ---------------------------------------------------------------- Roborock-Saugroboter + Anwesenheit
 import roborock_vac as _roborock  # noqa: E402
+import kobold_vac as _kobold  # noqa: E402
+import vacuums as _vacuums  # noqa: E402
 
-vacuum = _roborock.Vacuum(push)
+roborock = _roborock.Vacuum(push)
+kobold = _kobold.Kobold(push)
+vacuum = _vacuums.Vacuums(roborock, kobold)       # Roborock + Vorwerk Kobold in einer Liste (ab Hub 2.57)
 
 
 @app.get("/api/vacuum")
@@ -2004,7 +2008,7 @@ def vacuum_list(p=Depends(person)):
 
 
 class VacuumCommand(BaseModel):
-    action: str                     # start | pause | stop | dock | find | rooms | fan | water | wash | empty | dry
+    action: str                     # start | pause | stop | dock | find | rooms | fan | water | route | mode | wash | empty | dry
     value: dict | str | bool | None = None
 
 
@@ -2715,7 +2719,7 @@ def attention_list(p=Depends(person)):
 
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
-                           "vacuum": vacuum, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
+                           "vacuum": roborock, "kobold": kobold, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
                            "nightheat": nightheat, "doorbird": doorbird, "chime": chime, "music": music, "judo": judo,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})

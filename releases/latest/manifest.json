@@ -1,10 +1,9 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.55.1",
- "file": "hub-2.55.1.tar.gz",
- "sha256": "313c227b1e55179082b83bafbf28a48496f66617e5530840ba7a44767c18e76a",
+ "version": "2.56.0",
+ "file": "hub-2.56.0.tar.gz",
+ "sha256": "821c0aa63173c934dfe2ef013960df032e09b785c652c8fb672cdddcbc50d3c2",
  "files": [
-  "VERSION",
   "appliance_learn.py",
   "attention.py",
   "caddy-https.sh",
@@ -27,6 +26,7 @@
   "i18n.py",
   "install.sh",
   "judo.py",
+  "kobold_vac.py",
   "lgthinq.py",
   "liesenberg-home.service",
   "liveactivity.py",
@@ -52,8 +52,10 @@
   "updater.py",
   "vacation.py",
   "vacuum_schedule.py",
+  "vacuums.py",
+  "VERSION",
   "wind_gate.py"
  ],
- "notes": "Tor S\u00fcd und Nord in Szenen getauscht (S\u00fcd = au\u00dfen, Nord = innen)",
- "created": 1795179494
+ "notes": "Roborock: Wischroute und Reinigungsmodus",
+ "created": 1795272527
 }
