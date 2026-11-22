@@ -359,6 +359,7 @@ def attach(app, ctx):
                 + (_shelly_card(c, csrf) if b == "shelly" else "")
                 + _doorbird_card(c, csrf)
                 + _judo_card(c, csrf)
+                + _gate_pico_card(c, csrf)
                 + names)
         return _page("Geräte", body, "haus", csrf)
 
@@ -515,6 +516,44 @@ def attach(app, ctx):
                   f'Software {E(info.get("version") or "?")}</p>' if j.connected
                   else f'<p class=bad>{E(j.error or "verbindet …")}</p>')
         return f'<div class=card><h2>Wasser (JUDO-Enthärtung)</h2>{steps}{form}{st}</div>'
+
+    def _gate_pico_card(c, csrf):
+        gp = CTX.get("gate_pico")
+        if gp is None:
+            return ""
+        d = c.get("gate_pico") or {}
+        cur = d.get("gate") or "sued"
+        opts = "".join(f'<option value="{k}" {"selected" if cur == k else ""}>{n}</option>'
+                       for k, n in (("sued", "Tor Süd"), ("nord", "Tor Nord")))
+        chk = lambda name, on, label: (f'<label style="display:flex;gap:8px;align-items:center;color:var(--text)">'
+                                       f'<input style="width:auto" type=checkbox name={name} value=1 {"checked" if on else ""}>{E(label)}</label>')
+        form = _form("/setup/gate_pico/save",
+                     _field("url", "Adresse des Tor-Picos", d.get("url"), placeholder="z. B. http://192.168.178.54",
+                            help_="Leer = aus. Der Hub liest nur GET /status (Endlagen, Motor, Lichtschranke) – "
+                                  "Befehle gehen weiter über die Hausanlage.")
+                     + f'<label>Welches Tor</label><select name=gate>{opts}</select>'
+                     + chk("enabled", d.get("enabled"), "Abfragen (Test – Anzeige in der App)")
+                     + chk("use_for_gate", d.get("use_for_gate"), "Für die Torstellung verwenden (Fußgänger, Tor zu, Windalarm)")
+                     + chk("push_photocell", d.get("push_photocell"), "Mitteilung, wenn die Lichtschranke beim Zufahren unterbricht"),
+                     csrf, "Speichern")
+        st = ""
+        if gp.active():
+            i = gp.info()
+            st = (f'<p class=ok>✓ online: {E(i.get("text") or "")}, Firmware {E(i.get("version") or "?")}</p>' if i.get("online")
+                  else f'<p class=bad>offline: {E(i.get("error") or "verbindet …")}</p>')
+        return f'<div class=card><h2>Tor-Rückmeldung (Tor-Pico)</h2>{form}{st}</div>'
+
+    @app.post("/setup/gate_pico/save")
+    async def gate_pico_save(request: Request):
+        f = await request.form()
+        url = (f.get("url") or "").strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        gate = f.get("gate") if f.get("gate") in ("sued", "nord") else "sued"
+        hub_config.update({"gate_pico": {"url": url, "gate": gate, "enabled": bool(f.get("enabled")) and bool(url),
+                                         "use_for_gate": bool(f.get("use_for_gate")),
+                                         "push_photocell": bool(f.get("push_photocell"))}})
+        return _done(request.state.tok, "haus", True, "Tor-Pico gespeichert." if url else "Tor-Pico ausgeschaltet.")
 
     @app.post("/setup/judo/save")
     async def judo_save(request: Request):

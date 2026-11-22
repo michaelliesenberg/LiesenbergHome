@@ -23,6 +23,7 @@ DEFAULTS = {
     "heatpump": {"host": ""},
     "doorbird": {"host": "", "user": "", "password": "", "chime": {}},   # DoorBird-Türstation (doorbird.py), host leer = automatisch suchen             # Luxtronik-Wärmepumpe (z. B. 192.168.178.87), leer = keine
     "judo": {"host": "", "user": "admin", "password": "", "prices": {"water": None, "sewage": None, "base_year": None}},   # JUDO-Enthärtung (judo.py): Connectivity-Modul, Passwort leer = Werkseinstellung
+    "gate_pico": {"enabled": False, "url": "", "gate": "sued", "use_for_gate": False, "push_photocell": False},   # Tor-Pico (gate_pico.py): nur Rückmeldung, url z. B. http://192.168.178.54
     "lgthinq": {"pat": "", "country": "DE", "client_id": ""},   # LG ThinQ Connect (Personal Access Token)
     "lang": "de",                         # Sprache der Einrichtungsseite und der Mitteilungen: "de" | "pt-BR"
     "evcc": {"url": "", "sites": {}},

@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.56.0",
- "file": "hub-2.56.0.tar.gz",
- "sha256": "821c0aa63173c934dfe2ef013960df032e09b785c652c8fb672cdddcbc50d3c2",
+ "version": "2.57.0",
+ "file": "hub-2.57.0.tar.gz",
+ "sha256": "7295f31168c66fb2e6774682edca582bd13952b74e03f6c5675650396b114ce8",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -15,6 +15,7 @@
   "energy_log.py",
   "forecast.py",
   "gate_ped.py",
+  "gate_pico.py",
   "gate_smart.py",
   "geo_ref.py",
   "ha.py",
@@ -56,6 +57,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Roborock: Wischroute und Reinigungsmodus",
- "created": 1795272527
+ "notes": "Tor-Pico: Abfrage zum Testen (/api/gate/pico)",
+ "created": 1795337816
 }

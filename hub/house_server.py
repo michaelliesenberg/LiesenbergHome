@@ -1293,6 +1293,41 @@ wind_gate = _wind_gate.WindGate(
 wind_gate.loop()
 
 
+# ---------------------------------------------------------------- Tor-Pico: echte Rückmeldung (gate_pico.py, nur lesen)
+import gate_pico as _gate_pico  # noqa: E402
+
+
+def _pico_gate(key):
+    g = smart_gates.gates().get(key)
+    return (smart_gates.model(g), g["name"]) if g else (None, None)
+
+
+gate_pico = _gate_pico.GatePico(
+    lambda: hub_config.get("gate_pico") or {}, _pico_gate,
+    lambda title, body: push.send("weekly", title, body, aps_extra={"interruption-level": "time-sensitive"}))
+gate_pico.loop()
+
+
+def _gate_pico_info():
+    key = gate_pico.cfg().get("gate") or "sued"
+    g = smart_gates.gates().get(key) if gate_pico.active() else None
+    est, devs = None, []
+    if g:
+        e = smart_gates.model(g).estimate()
+        est = {**e, "text": _gate_ped._fmt(e)}
+        devs = [g["open"], g["step"], f"{_gate_smart.PREFIX}{key}:zu"]
+        if pedestrian.load()["devices"].get("open") == g["open"]:
+            devs.append(PED_ID)
+    return gate_pico.info(est, g["name"] if g else None, devs)
+
+
+@app.get("/api/gate/pico")
+def gate_pico_get(p=Depends(person)):
+    """Tor-Pico: echte Torstellung (Endlagen, Motor, Lichtschranke) – {"enabled": false} ohne Tor-Pico."""
+    _need_gate(p)
+    return _gate_pico_info()
+
+
 @app.get("/api/wind-gate")
 def wind_gate_info(p=Depends(person)):
     """Windalarm-Tor-Automatik: Alarm, Einstellung, letzter Ablauf."""
@@ -1338,7 +1373,10 @@ async def gate_ped_put(request: Request, p=Depends(person)):       # jeder, der 
 def gate_ped_state(p=Depends(person)):
     """Nur der Laufzustand (für die Animation in der App, wird während des Ablaufs oft abgefragt)."""
     _need_gate(p)
-    return {**pedestrian.state, "now": time.time(), "position": pedestrian.model.estimate()}
+    out = {**pedestrian.state, "now": time.time(), "position": pedestrian.model.estimate()}
+    if gate_pico.active():
+        out["pico"] = _gate_pico_info()
+    return out
 
 
 @app.post("/api/gate/pedestrian/run")
@@ -2720,7 +2758,7 @@ def attention_list(p=Depends(person)):
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": roborock, "kobold": kobold, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
-                           "nightheat": nightheat, "doorbird": doorbird, "chime": chime, "music": music, "judo": judo,
+                           "nightheat": nightheat, "doorbird": doorbird, "gate_pico": gate_pico, "chime": chime, "music": music, "judo": judo,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 

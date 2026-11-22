@@ -82,6 +82,8 @@ class GateModel:
         self.travel_fn, self.path, self.clock = travel_fn, path, clock
         self._lock = threading.RLock()
         self.s = {"pos0": None, "dir": None, "since": clock(), "last": None, "by": None, "seen": None}
+        # echte Rückmeldung (Tor-Pico, gate_pico.py): () → {"pos": 0/1/None, "dir": 1/-1/0} oder None (offline/unklar)
+        self.feedback = None
         try:
             with open(path) as f:
                 d = json.load(f)
@@ -101,6 +103,8 @@ class GateModel:
     def _settle(self, now):
         """Fahrt zu Ende gerechnet? → als stehend an der Endlage merken."""
         s, T = self.s, self.travel_fn()
+        if s["dir"] in (1, -1) and self._fb_dir() == s["dir"]:
+            return                                            # Tor-Pico: Motor läuft noch → nicht „angekommen“ rechnen
         if s["dir"] in (1, -1):
             el = max(0.0, now - (s["since"] or now))
             if s["pos0"] is None:
@@ -110,6 +114,13 @@ class GateModel:
                 p = s["pos0"] + s["dir"] * el / T
                 if (s["dir"] > 0 and p >= 1) or (s["dir"] < 0 and p <= 0):
                     s.update(pos0=1.0 if s["dir"] > 0 else 0.0, last=s["dir"], dir=0, since=now)
+
+    def _fb_dir(self):
+        try:
+            fb = self.feedback() if self.feedback else None
+        except Exception:
+            fb = None
+        return fb.get("dir") if fb else None
 
     def _pos(self, now):
         s = self.s
@@ -131,8 +142,61 @@ class GateModel:
                 left = max(0.0, T - el) if pos is None else (1 - pos if s["dir"] > 0 else pos) * T
             known = pos is not None and s["dir"] is not None
             age = None if not s.get("seen") else round(max(0.0, now - s["seen"]), 1)   # seit letztem Hub-Impuls
-            return {"pos": None if pos is None else round(pos, 3), "dir": s["dir"], "last": s["last"],
-                    "left": None if left is None else round(left, 1), "known": known, "by": s["by"], "age": age}
+            d, last, src = s["dir"], s["last"], "estimate"
+            fb = None
+            try:
+                fb = self.feedback() if self.feedback else None
+            except Exception:
+                fb = None
+            if fb and fb.get("dir") in (1, -1, 0):
+                # Tor-Pico online: Richtung echt, Stellung an der Endlage echt; dazwischen aus der Schätzung
+                src, age, d = "pico", 0.0, fb["dir"]
+                if fb.get("pos") is not None:
+                    pos = float(fb["pos"])
+                    last = 1 if pos >= 1 else -1 if pos <= 0 else last
+                if d in (1, -1):
+                    last = d
+                    if pos is not None:
+                        if (d > 0 and pos >= 1) or (d < 0 and pos <= 0):     # Schätzung schon „angekommen“, Motor läuft noch
+                            pos = 0.97 if d > 0 else 0.03
+                        left = (1 - pos if d > 0 else pos) * T
+                    else:
+                        el = now - (s["since"] or now) if s["dir"] == d else 0.0
+                        left = max(1.0, T - el)
+                else:
+                    left = None
+                known = pos is not None
+            return {"pos": None if pos is None else round(pos, 3), "dir": d, "last": last,
+                    "left": None if left is None else round(left, 1), "known": known, "by": s["by"], "age": age,
+                    "src": src}
+
+    def sync(self, pos, d, by="Tor-Pico", now=None):
+        """Echte Rückmeldung (Tor-Pico) übernehmen: pos 0.0/1.0 an der Endlage oder None (= aus der Schätzung
+        weiterrechnen), d +1 fährt auf, -1 fährt zu, 0 steht. Läuft der Pico aus, rechnet die Schätzung von hier weiter."""
+        with self._lock:
+            now = self.clock() if now is None else now
+            s = self.s
+            if not (d in (1, -1) and s["dir"] == d):
+                self._settle(now)
+            cur = self._pos(now)
+            if d in (1, -1) and s["dir"] == d and pos is None:
+                s["by"], s["seen"] = by, now                 # fährt schon so (z. B. nach eigenem Hub-Impuls)
+                self._save()
+                return
+            if s["dir"] in (1, -1):
+                s["last"] = s["dir"]
+            p = cur if pos is None else max(0.0, min(1.0, float(pos)))
+            if d in (1, -1) and p is not None:
+                p = min(p, 0.97) if d > 0 else max(p, 0.03)  # Motor läuft → noch nicht an der Endlage
+            s.update(pos0=p, dir=d, since=now)
+            if d in (1, -1):
+                s["last"] = d
+            elif pos is not None and pos >= 1:
+                s["last"] = 1
+            elif pos is not None and pos <= 0:
+                s["last"] = -1
+            s["by"], s["seen"] = by, now
+            self._save()
 
     def observe(self, role, by="", now=None):
         """Ein Impuls ist rausgegangen (Rolle open/step/close/stop)."""
