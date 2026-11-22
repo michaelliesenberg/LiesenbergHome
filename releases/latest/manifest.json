@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.58.0",
- "file": "hub-2.58.0.tar.gz",
- "sha256": "35967ba9c4a026f84a82b19d25b70113db308962a25f43884e6b490547df9de8",
+ "version": "2.58.1",
+ "file": "hub-2.58.1.tar.gz",
+ "sha256": "ab218c0841027ea24bf794a0242cdcbfca35c4f62b142c1c3da25b69d1287222",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -58,6 +58,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Saugen, wenn alle weg sind: Saugroboter starten automatisch, sobald alle weg sind.",
- "created": 1795338886
+ "notes": "Vorwerk Kobold VR7, Saugen wenn alle weg sind",
+ "created": 1795339103
 }
