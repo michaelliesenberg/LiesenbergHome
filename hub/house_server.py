@@ -2401,6 +2401,26 @@ import vacuum_schedule as _vacuum_schedule  # noqa: E402
 
 vacuum_schedules = _vacuum_schedule.VacuumSchedules(vacuum, push, someone_home)
 
+# ---------------------------------------------------------------- Saugen, wenn alle weg sind (alle Roboter, ab Hub 2.58)
+import away_clean as _away_clean  # noqa: E402
+
+away_clean = _away_clean.AwayClean(vacuum, push, someone_home, vacuum_schedules,
+                                   legacy_on=any(v.configured and v.state.get("auto_away") for v in (roborock, kobold)))
+vacuum.away = away_clean
+
+
+@app.get("/api/vacuum/away")
+def vacuum_away_get(p=Depends(person)):
+    return away_clean.get()
+
+
+@app.put("/api/vacuum/away")
+def vacuum_away_set(body: dict, p=Depends(can_edit)):
+    try:
+        return away_clean.set(body, by=p["name"])
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/api/vacuum/schedules")
 def vacuum_schedules_list(p=Depends(person)):

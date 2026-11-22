@@ -1,11 +1,12 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.57.0",
- "file": "hub-2.57.0.tar.gz",
- "sha256": "7295f31168c66fb2e6774682edca582bd13952b74e03f6c5675650396b114ce8",
+ "version": "2.58.0",
+ "file": "hub-2.58.0.tar.gz",
+ "sha256": "35967ba9c4a026f84a82b19d25b70113db308962a25f43884e6b490547df9de8",
  "files": [
   "appliance_learn.py",
   "attention.py",
+  "away_clean.py",
   "caddy-https.sh",
   "consumers.py",
   "daikin.py",
@@ -57,6 +58,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Tor-Pico: Abfrage zum Testen (/api/gate/pico)",
- "created": 1795337816
+ "notes": "Saugen, wenn alle weg sind: Saugroboter starten automatisch, sobald alle weg sind.",
+ "created": 1795338886
 }

@@ -1,103 +1,99 @@
-"""Vorwerk-Kobold-Saugroboter (VR300/VR200, MyKobold-App): Status, Steuerung, Zonen – über pybotvac (Vorwerk-Cloud).
+"""Vorwerk-Kobold-Saugroboter VR7 (MyKobold-App): Status live, Steuerung, Räume – über die Vorwerk-Cloud.
 
-Anmeldung (einmalig, Besitzer, Einrichtungsseite → Vorwerk Kobold): E-Mail der MyKobold-App eingeben → Vorwerk schickt
-einen Code per Mail → Code eingeben. Kein Passwort. Mit dem Anmelde-Token holt der Hub einmal die Roboterliste
-(Seriennummer + Geräteschlüssel); gesteuert wird danach mit dem Geräteschlüssel über die Vorwerk-Cloud (nucleo).
-Gespeichert wird beides nur auf dem Hub (kobold.json, chmod 600).
+Weg wie die MyKobold-App (nachgebaut nach github.com/TWIX99b/ha-vorwerk-kobold, MIT-Lizenz, © Niklas Boose):
+  * Anmeldung: E-Mail der MyKobold-App → Vorwerk schickt einen Code → Code eingeben (Auth0, kein Passwort).
+    Gespeichert werden nur id_token + refresh_token (kobold.json, chmod 600, nur auf dem Hub).
+  * Roboter, Karten, Räume, Starten:  REST https://orbital.ksecosys.com  (Authorization: Auth0Bearer <id_token>)
+  * Status live:  Websocket der „Companion"-Cloud (Phoenix-Kanäle), Anmeldung per POST /api/v1/profile/login.
+  * Befehle (Pause, Station, Finden …):  POST /vendors/3/robots/<Seriennummer>/messages {"ability": …}
 
-Gerät-IDs in der App: „kobold-<Seriennummer>" (so kann der Hub Roborock und Vorwerk in einer Liste zeigen).
+Der ältere VR300/VR200 läuft über eine andere Vorwerk-Cloud (pybotvac/beehive) und wird hier nicht unterstützt.
 
-Räume: Der VR300 kennt keine Raumaufteilung wie Roborock, nur Zonen, die in der MyKobold-App auf der Karte
-eingezeichnet wurden. Die erscheinen hier als „Räume". Pro Start kann der Roboter nur eine Zone reinigen; mehrere
-gewählte Zonen fährt der Hub nacheinander ab (nächste Zone, sobald der Roboter wieder in der Station steht).
+Gerät-IDs in der App: „kobold-<Roboter-ID>". Räume = Zonen, die in der MyKobold-App in eine Karte eingezeichnet
+wurden (App-IDs 1…n, der Hub merkt sich Karte + Zone dazu).
 """
+import asyncio
+import base64
 import json
 import os
+import ssl
 import threading
 import time
+import uuid
 from datetime import datetime
-
-import requests
 
 from hub_config import DATA_DIR
 
 STATE_FILE = os.path.join(DATA_DIR, "kobold.json")
-CLIENT_ID = "KY4YbVAvtgB7lp8vIbWQ7zLk3hssZlhR"          # MyKobold-App (öffentlich bekannt, siehe pybotvac)
-TOKEN_URL = "https://mykobold.eu.auth0.com/oauth/token"
 PREFIX = "kobold-"
 
-STATE = {0: "invalid", 1: "idle", 2: "busy", 3: "paused", 4: "error"}
-ACTION_DE = {1: "saugt", 2: "Spot-Reinigung", 3: "manuell", 4: "fährt zur Station", 5: "Menü am Gerät",
-             6: "Reinigung unterbrochen", 7: "Update", 8: "Logs kopieren", 9: "sucht Position", 10: "Test",
-             11: "Zonenreinigung", 12: "erkundet Karte", 13: "sucht Position auf Karte", 14: "erstellt Karte",
-             15: "Erkundung unterbrochen"}
-ALERT_DE = {
-    "ui_alert_dust_bin_full": "Staubbehälter voll", "ui_alert_recovering_location": "sucht seine Position",
-    "ui_alert_battery_chargebasecommerr": "Verbindung zur Station gestört", "ui_alert_busy_charging": "lädt noch",
-    "ui_alert_charging_base": "steht in der Station", "ui_alert_charging_power": "lädt",
-    "ui_alert_connect_chrg_cable": "Ladekabel prüfen", "ui_alert_info_thank_you": "",
-    "ui_alert_invalid": "", "ui_alert_old_error": "", "ui_alert_swupdate_fail": "Update fehlgeschlagen",
-    "dustbin_full": "Staubbehälter voll", "maint_brush_change": "Bürste wechseln", "maint_filter_change": "Filter wechseln",
-    "clean_completed_to_start": "", "nav_floorplan_not_created": "keine Karte",
-    "nav_floorplan_load_fail": "Karte nicht geladen", "nav_floorplan_localization_fail": "findet sich auf der Karte nicht",
-    "clean_incomplete_to_start": "Reinigung unvollständig", "log_upload_failed": "",
-}
+AUTH = "https://mykobold.eu.auth0.com"
+CLIENT_ID = "FPSBig7ePFvAE6q99cEDROM8gYUTygkD"          # MyKobold-App (aus ha-vorwerk-kobold)
+ORBITAL = "https://orbital.ksecosys.com"
+COMPANION = "https://api-2-prod.companion.kobold.vorwerk.com"
+COMPANION_WS = "wss://api-2-prod.companion.kobold.vorwerk.com/api/ws"
+VENDOR_ID = 3
+UA = "okhttp/5.1.0"
+APP_HEADERS = {"Accept-Language": "de-DE", "mobile-app-version": "3.14.0", "mobile-app-build": "40408",
+               "mobile-app-os": "android", "mobile-app-os-version": "11", "User-Agent": UA}
+ORB_ACCEPT = "application/vnd.neato.orbital-http.v1+json"
+
+CLEANING_ACTIONS = {"cleaning", "fast_mapping", "mapping", "map_creation", "spot_cleaning"}
+RETURNING_ACTIONS = {"docking", "returning", "going_home"}
+FAN_DE = {"auto": "Auto", "eco": "Eco", "turbo": "Turbo", "pet": "Tierhaare"}
+NAV_DE = {"normal": "Normal", "extra_care": "Extra Care"}
 ERROR_DE = {
-    "ui_error_battery_overtemp": "Akku zu heiß", "ui_error_bin_full": "Staubbehälter voll",
-    "ui_error_brush_stuck": "Bürste blockiert", "ui_error_brush_overloaded": "Bürste überlastet",
-    "ui_error_bumper_stuck": "Stoßstange klemmt", "ui_error_check_battery_switch": "Akkuschalter prüfen",
-    "ui_error_corrupt_scb": "interner Fehler", "ui_error_deck_debris": "Schmutz unter dem Gerät",
-    "ui_error_dflt_app": "Fehler – bitte MyKobold-App prüfen", "ui_error_disconnect_chrg_cable": "Ladekabel trennen",
-    "ui_error_disconnect_usb_cable": "USB-Kabel trennen", "ui_error_dust_bin_missing": "Staubbehälter fehlt",
-    "ui_error_dust_bin_emptied": "Staubbehälter geleert", "ui_error_dust_bin_full": "Staubbehälter voll",
-    "ui_error_hardware_failure": "Hardwarefehler", "ui_error_ldrop_stuck": "Rad links hängt",
-    "ui_error_lds_jammed": "Laser blockiert", "ui_error_lds_bad_packets": "Laser gestört",
-    "ui_error_lds_disconnected": "Laser getrennt", "ui_error_lds_missed_packets": "Laser gestört",
-    "ui_error_lwheel_stuck": "Rad links blockiert", "ui_error_navigation_backdrop_frontbump": "kommt nicht weiter",
-    "ui_error_navigation_backdrop_leftbump": "kommt nicht weiter", "ui_error_navigation_backdrop_wheelextended": "kommt nicht weiter",
-    "ui_error_navigation_noprogress": "kommt nicht weiter", "ui_error_navigation_origin_unclean": "Startpunkt nicht sauber",
-    "ui_error_navigation_pathproblems": "findet keinen Weg", "ui_error_navigation_pinkycommsfail": "interner Fehler",
-    "ui_error_navigation_falling": "Absturzsensor – Hindernis entfernen", "ui_error_navigation_noexitstogo": "findet keinen Ausgang",
-    "ui_error_navigation_nomotioncommands": "interner Fehler", "ui_error_navigation_rightdrop_leftbump": "kommt nicht weiter",
-    "ui_error_navigation_undockingfailed": "kommt nicht aus der Station", "ui_error_picked_up": "wurde hochgehoben",
-    "ui_error_qa_fail": "interner Fehler", "ui_error_rdrop_stuck": "Rad rechts hängt",
-    "ui_error_reconnect_failed": "Verbindung fehlgeschlagen", "ui_error_rwheel_stuck": "Rad rechts blockiert",
-    "ui_error_stuck": "steckt fest", "ui_error_unable_to_return_to_base": "findet nicht zurück zur Station",
-    "ui_error_unable_to_see": "Sensoren verschmutzt", "ui_error_vacuum_slip": "rutscht",
-    "ui_error_vacuum_stuck": "Sauger blockiert", "ui_error_warning": "Warnung",
-    "error_check_battery_switch": "Akkuschalter prüfen", "error_dust_bin_missing": "Staubbehälter fehlt",
-    "error_dust_bin_full": "Staubbehälter voll",
+    "brush_stuck": "Bürste blockiert", "bin_full": "Staubbehälter voll", "dustbin_missing": "Staubbehälter fehlt",
+    "cleaning_path_blocked": "Weg blockiert", "navigation_path_problems_returning_home": "findet nicht zurück zur Station",
+    "bumper_stuck": "Stoßstange klemmt", "wheel_stuck": "Rad blockiert", "robot_stuck": "steckt fest",
+    "battery_low": "Akku leer", "picked_up": "wurde hochgehoben", "cliff_sensor": "Absturzsensor verschmutzt",
 }
-FAN_DE = {"eco": "Eco", "turbo": "Turbo"}
-FAN_CODE = {"eco": 1, "turbo": 2}
-NAV_DE = {"normal": "Normal", "extra_care": "Extra Care", "deep": "Gründlich"}
-NAV_CODE = {"normal": 1, "extra_care": 2, "deep": 3}
+BASE_ERROR_DE = {"bag_full": "Staubbeutel der Station voll", "bag_missing": "Staubbeutel der Station fehlt"}
 
 
-def _text(code, table):
-    if not code:
+def _jwt_exp(tok):
+    try:
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(p)).get("exp"))
+    except Exception:
         return None
-    if code in table:
-        return table[code] or None
-    return code.replace("ui_error_", "").replace("ui_alert_", "").replace("_", " ")
+
+
+class KoboldError(Exception):
+    pass
+
+
+class AuthError(KoboldError):
+    pass
 
 
 class Kobold:
     def __init__(self, push=None):
         self.push = push
-        self.robots = {}           # duid → pybotvac.Robot
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        self.session = None
+        self.robots = {}           # duid → Roboter-Daten aus der Cloud (id, serial, name, model …)
+        self.raw = {}              # duid → letzter Roh-Status (für Befehle: available_commands)
         self.status = {}           # duid → dict für die App (gleiches Format wie roborock_vac)
+        self.cleaning = {}         # duid → letzter cleaning_state
         self.error = None
-        self._pending = None       # (email, session, Zeit)
+        self._pending = None       # (email, Zeit) zwischen „Code anfordern" und „Code eingeben"
         self._prev = {}
-        self._queue = {}           # duid → noch zu reinigende Zonen (boundary ids)
-        self._lock = threading.Lock()
+        self._ws = None
+        self._ws_task = None
+        self._joins = {}
+        self._ref = 0
         self.state = self._load()
-        if self.state.get("robots"):
-            threading.Thread(target=self._connect, daemon=True).start()
-        threading.Thread(target=self._poller, daemon=True).start()
+        if self.configured:
+            self._run(self._start(), wait=False)
 
     # ---------------------------------------------------------- Infrastruktur
+    def _run(self, coro, timeout=45, wait=True):
+        fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return fut.result(timeout) if wait else fut
+
     def _load(self):
         try:
             with open(STATE_FILE) as f:
@@ -114,187 +110,371 @@ class Kobold:
 
     @property
     def configured(self):
-        return bool(self.state.get("token"))
+        return bool(self.state.get("refresh_token"))
 
     def owns(self, duid):
         return str(duid).startswith(PREFIX)
 
+    async def _http(self):
+        if self.session is None or self.session.closed:
+            import aiohttp
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                ctx = ssl.create_default_context()
+            self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx),
+                                                 timeout=aiohttp.ClientTimeout(total=30))
+        return self.session
+
+    async def _req(self, method, url, headers, body=None, want_resp=False):
+        s = await self._http()
+        async with s.request(method, url, headers=headers, json=body) as r:
+            text = await r.text()
+            if r.status == 401:
+                raise AuthError(f"HTTP 401: {text[:150]}")
+            if r.status >= 400:
+                raise KoboldError(f"HTTP {r.status}: {text[:200]}")
+            if want_resp:
+                return r
+            try:
+                return json.loads(text) if text else None
+            except ValueError:
+                return text
+
     # ---------------------------------------------------------- Anmeldung (E-Mail-Code)
     def request_code(self, email):
-        from pybotvac import PasswordlessSession, Vorwerk
-        email = (email or "").strip()
+        email = (email or "").strip().lower()
         if "@" not in email:
             raise ValueError("Bitte die E-Mail-Adresse der MyKobold-App eingeben")
-        s = PasswordlessSession(client_id=CLIENT_ID, vendor=Vorwerk())
-        s.send_email_otp(email)
-        self._pending = (email, s, time.time())
+        self._run(self._req("POST", f"{AUTH}/passwordless/start", {"User-Agent": UA, "Content-Type": "application/json"},
+                            {"client_id": CLIENT_ID, "email": email, "send": "code", "connection": "email"}))
+        self._pending = (email, time.time())
 
     def login(self, code):
-        if not self._pending or time.time() - self._pending[2] > 15 * 60:
+        if not self._pending or time.time() - self._pending[1] > 15 * 60:
             raise ValueError("Bitte zuerst den Code anfordern (gilt 15 Minuten)")
-        email, s, _ = self._pending
+        email = self._pending[0]
         code = "".join(ch for ch in str(code) if ch.isdigit())
-        s.fetch_token_passwordless(email, code)
-        self.state = {"email": email, "token": s._token, "auto_away": self.state.get("auto_away", False),
-                      "fan": self.state.get("fan", {}), "nav": self.state.get("nav", {})}
-        self._pending = None
-        self._discover()
+        try:
+            tok = self._run(self._req("POST", f"{AUTH}/oauth/token", {"User-Agent": UA, "Content-Type": "application/json"}, {
+                "client_id": CLIENT_ID, "grant_type": "http://auth0.com/oauth/grant-type/passwordless/otp",
+                "realm": "email", "username": email, "otp": code, "scope": "openid profile email offline_access",
+                "platform": "android", "locale": "de", "source": "vorwerk_auth0"}))
+        except KoboldError as e:
+            raise ValueError(f"Code falsch oder abgelaufen ({e})")
+        if not isinstance(tok, dict) or not tok.get("id_token") or not tok.get("refresh_token"):
+            raise ValueError("Vorwerk hat kein Anmelde-Token geliefert")
+        self.state.update(email=email, id_token=tok["id_token"], refresh_token=tok["refresh_token"])
         self._save()
-        if not self.state.get("robots"):
+        self._pending = None
+        self._run(self._start(), timeout=60)
+        if not self.robots:
             raise ValueError(self.error or "Kein Roboter im MyKobold-Konto gefunden")
 
     def logout(self):
-        self.robots, self.status, self.state, self._queue = {}, {}, {}, {}
+        self._run(self._stop_ws(), wait=True)
+        self.robots, self.status, self.raw, self.cleaning = {}, {}, {}, {}
+        keep = {k: self.state[k] for k in ("auto_away",) if k in self.state}
+        self.state = keep
         try:
             os.remove(STATE_FILE)
         except OSError:
             pass
 
-    # ---------------------------------------------------------- Token + Roboterliste (nur hierfür braucht es das Token)
-    def _session(self):
-        from pybotvac import PasswordlessSession, Vorwerk
-        return PasswordlessSession(token=self.state.get("token"), client_id=CLIENT_ID, vendor=Vorwerk())
+    async def _token(self):
+        tok = self.state.get("id_token")
+        exp = _jwt_exp(tok) if tok else None
+        if tok and (exp is None or exp - 300 > time.time()):
+            return tok
+        return await self._refresh_token()
 
-    def _refresh_token(self):
-        rt = (self.state.get("token") or {}).get("refresh_token")
+    async def _refresh_token(self):
+        rt = self.state.get("refresh_token")
         if not rt:
-            raise RuntimeError("Anmeldung abgelaufen – bitte auf der Einrichtungsseite neu anmelden")
-        r = requests.post(TOKEN_URL, json={"grant_type": "refresh_token", "client_id": CLIENT_ID, "refresh_token": rt},
-                          timeout=15)
-        r.raise_for_status()
-        tok = r.json()
-        tok.setdefault("refresh_token", rt)
-        self.state["token"] = tok
+            raise AuthError("nicht angemeldet")
+        try:
+            r = await self._req("POST", f"{AUTH}/oauth/token", {"User-Agent": UA, "Content-Type": "application/json"},
+                                {"client_id": CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt})
+        except KoboldError as e:
+            if "403" in str(e) or "401" in str(e) or "invalid_grant" in str(e):
+                self.error = "Vorwerk-Anmeldung abgelaufen – bitte auf der Einrichtungsseite neu anmelden"
+                raise AuthError(self.error)
+            raise
+        self.state["id_token"] = r["id_token"]
+        if r.get("refresh_token"):
+            self.state["refresh_token"] = r["refresh_token"]
         self._save()
+        return r["id_token"]
 
-    def _account_call(self, fn):
-        """fn(Account) mit gültigem Token; bei abgelaufenem Token einmal erneuern"""
-        from pybotvac import Account
+    async def _orb(self, method, path, body=None, app=False):
+        h = {"Authorization": f"Auth0Bearer {await self._token()}", "Accept": ORB_ACCEPT,
+             "Content-Type": "application/json", "User-Agent": UA}
+        if app:
+            h.update(APP_HEADERS)
         try:
-            return fn(Account(self._session()))
-        except Exception:
-            self._refresh_token()
-            return fn(Account(self._session()))
+            return await self._req(method, ORBITAL + path, h, body)
+        except AuthError:
+            self.state["id_token"] = None
+            h["Authorization"] = f"Auth0Bearer {await self._token()}"
+            return await self._req(method, ORBITAL + path, h, body)
 
-    def _discover(self):
-        """Roboter (Seriennummer, Schlüssel, Server) und Zonen aus dem Konto holen und merken"""
-        def go(acc):
-            resp = acc._session.get("users/me/robots").json()
-            maps = {}
-            for r in resp:
-                try:
-                    pm = acc._session.get(f"users/me/robots/{r['serial']}/persistent_maps").json()
-                    maps[r["serial"]] = [m.get("id") for m in pm if m.get("id")]
-                except Exception:
-                    maps[r["serial"]] = []
-            return resp, maps
+    # ---------------------------------------------------------- Roboter, Räume, Live-Verbindung
+    async def _start(self):
         try:
-            robots, maps = self._account_call(go)
+            await self._load_robots()
+            await self._load_rooms()
+            self.error = None if self.robots else "Kein Roboter im MyKobold-Konto gefunden"
         except Exception as e:
             self.error = f"Vorwerk: {e}"
-            print(f"[KOBOLD] Roboterliste: {e}", flush=True)
-            return
-        self.state["robots"] = [{"serial": r["serial"], "secret": r["secret_key"], "name": r.get("name"),
-                                 "model": r.get("model"), "traits": r.get("traits") or [],
-                                 "nucleo": r.get("nucleo_url") or "https://nucleo.ksecosys.com:4443",
-                                 "maps": maps.get(r["serial"], [])} for r in robots]
-        self.error = None if robots else "Kein Roboter im MyKobold-Konto gefunden"
+            print(f"[KOBOLD] Start: {e}", flush=True)
+        if self.robots and (self._ws_task is None or self._ws_task.done()):
+            self._ws_task = asyncio.ensure_future(self._ws_loop())
+            asyncio.ensure_future(self._housekeeping())
+
+    async def _load_robots(self):
+        found = {}
+        for r in await self._orb("GET", "/users/me/robots") or []:
+            if isinstance(r, dict) and r.get("id"):
+                duid = PREFIX + str(r["id"])
+                found[duid] = {"id": str(r["id"]), "serial": str(r.get("serial") or r["id"]),
+                               "name": r.get("name") or "Kobold",
+                               "model": "Kobold VR7" if r.get("model_name") in ("VRXX", "VR7") else (r.get("model_name") or "Kobold"),
+                               "firmware": r.get("firmware")}
+        self.robots = found
+        for duid, r in found.items():
+            st = self.status.setdefault(duid, {"id": duid, "kind": "kobold", "online": False, "stateText": "verbinde …"})
+            st.update(name=r["name"], model=r["model"])
+            try:
+                feats = await self._orb("GET", f"/robots/{r['id']}/features", app=True) or {}
+                r["fans"] = [m for m in FAN_DE if m in (feats.get("vacuuming_modes") or [])] or list(FAN_DE)
+                r["extra_care"] = bool(feats.get("extra_care_navigation"))
+            except Exception as e:
+                print(f"[KOBOLD] Funktionen: {e}", flush=True)
+
+    async def _load_rooms(self):
+        """Benannte Zonen aller benannten Karten → „Räume" mit laufender Nummer"""
+        rooms = self.state.setdefault("rooms", {})
+        for duid, r in self.robots.items():
+            out, maps = [], []
+            try:
+                plans = await self._orb("GET", f"/robots/{r['id']}/floorplans?sort_by=promoted_at&sort_order=asc") or []
+                for p in plans:
+                    if not isinstance(p, dict) or not p.get("floorplan_uuid") or not (p.get("name") or "").strip():
+                        continue
+                    tracks = await self._orb("GET", f"/maps/floorplans/{p['floorplan_uuid']}/tracks") or []
+                    for t in tracks:
+                        if isinstance(t, dict) and t.get("track_uuid") and t.get("type") in (None, "cleaning"):
+                            out.append({"map": p["floorplan_uuid"], "mapName": p["name"].strip(), "track": t["track_uuid"],
+                                        "name": (t.get("name") or "").strip() or "Zone"})
+                    maps.append({"uuid": p["floorplan_uuid"], "name": p["name"].strip()})
+            except Exception as e:
+                print(f"[KOBOLD] Karten: {e}", flush=True)
+                continue
+            r["maps"] = maps
+            multi = len({x["map"] for x in out}) > 1
+            for x in out:
+                if multi:
+                    x["name"] = f'{x["name"]} ({x["mapName"]})'
+            rooms[duid] = out
+            if duid in self.status:
+                self.status[duid]["rooms"] = [{"id": i + 1, "name": x["name"]} for i, x in enumerate(out)]
         self._save()
-        self._connect()
 
-    def _connect(self):
-        from pybotvac import Robot, Vorwerk
-        robots = {}
-        for r in self.state.get("robots") or []:
-            duid = PREFIX + r["serial"]
+    async def _companion_auth(self):
+        r = await self._req("POST", f"{COMPANION}/api/v1/profile/login",
+                            {"Authorization": f"Bearer {await self._token()}", **APP_HEADERS}, want_resp=True)
+        a = r.headers.get("Authorization")
+        if not a:
+            raise KoboldError("Companion-Anmeldung ohne Schlüssel")
+        return a
+
+    def _next_ref(self):
+        self._ref += 1
+        return str(self._ref)
+
+    async def _request_state(self, duid=None):
+        if self._ws is None or self._ws.closed:
+            return False
+        for d in [duid] if duid else list(self.robots):
+            ref = self._joins.get(d)
+            if ref:
+                await self._ws.send_str(json.dumps([ref, self._next_ref(), f"robots:{self.robots[d]['id']}",
+                                                    "last_state", {"request_id": str(uuid.uuid4())}]))
+        return True
+
+    async def _ws_loop(self):
+        import aiohttp
+        delay = 2
+        while self.configured and self.robots:
             try:
-                robots[duid] = Robot(serial=r["serial"], secret=r["secret"], traits=r["traits"], vendor=Vorwerk(),
-                                     name=r.get("name") or "Kobold", endpoint=r["nucleo"],
-                                     has_persistent_maps=bool(r.get("maps")))
+                auth = await self._companion_auth()
+                s = await self._http()
+                async with s.ws_connect(COMPANION_WS, headers={"Authorization": auth, **APP_HEADERS}, heartbeat=None) as ws:
+                    self._ws, self._ref, self._joins = ws, 0, {}
+                    for duid, r in self.robots.items():
+                        ref = self._next_ref()
+                        self._joins[duid] = ref
+                        await ws.send_str(json.dumps([ref, ref, f"robots:{r['id']}", "phx_join", {}]))
+                    await self._request_state()
+                    print("[KOBOLD] Live-Verbindung steht", flush=True)
+                    delay = 2
+                    hb = asyncio.ensure_future(self._heartbeat(ws))
+                    try:
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                self._on_message(msg.data)
+                            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+                    finally:
+                        hb.cancel()
+            except asyncio.CancelledError:
+                raise
+            except AuthError as e:
+                self.error = str(e)
+                print(f"[KOBOLD] Live-Verbindung: Anmeldung abgelehnt: {e}", flush=True)
+                delay = 600
             except Exception as e:
-                print(f"[KOBOLD] {r.get('name')}: {e}", flush=True)
-                self.status[duid] = {"id": duid, "name": r.get("name") or "Kobold", "online": False,
-                                     "stateText": "nicht erreichbar", "error": str(e)[:120], "kind": "kobold"}
-        self.robots = robots
-        for duid in robots:
-            self._load_zones(duid)
-            self._refresh(duid)
+                print(f"[KOBOLD] Live-Verbindung: {type(e).__name__}: {e}", flush=True)
+            self._ws = None
+            for st in self.status.values():
+                if time.time() - (st.get("updated") or 0) > 1800:
+                    st.update(online=False, stateText="nicht erreichbar")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 300)
 
-    def _load_zones(self, duid):
-        """Zonen aus der MyKobold-Karte als „Räume" (id = laufende Nummer, die App erwartet Zahlen)"""
-        rec = self._rec(duid)
-        zones = []
-        for map_id in rec.get("maps") or []:
+    async def _heartbeat(self, ws):
+        while not ws.closed:
+            await asyncio.sleep(30)
             try:
-                data = self.robots[duid].get_map_boundaries(map_id).json().get("data") or {}
-                for b in data.get("boundaries") or []:
-                    if b.get("type") == "polygon" and b.get("name") and b.get("enabled", True):
-                        zones.append({"bid": b["id"], "map": map_id, "name": b["name"]})
+                await ws.send_str(json.dumps([None, self._next_ref(), "phoenix", "heartbeat", {}]))
+            except Exception:
+                return
+
+    async def _housekeeping(self):
+        """alle 10 Min. Status nachfragen, alle 6 h Räume neu laden"""
+        n = 0
+        while self.configured:
+            await asyncio.sleep(600)
+            n += 1
+            try:
+                await self._request_state()
+                if n % 36 == 0:
+                    await self._load_rooms()
             except Exception as e:
-                print(f"[KOBOLD] Zonen: {e}", flush=True)
-        if zones or "zones" not in rec:
-            rec["zones"] = zones
-            self._save()
+                print(f"[KOBOLD] Nachfragen: {e}", flush=True)
 
-    def _rec(self, duid):
-        serial = duid[len(PREFIX):]
-        return next((r for r in self.state.get("robots") or [] if r["serial"] == serial), {})
+    async def _stop_ws(self):
+        if self._ws_task:
+            self._ws_task.cancel()
+        if self._ws is not None and not self._ws.closed:
+            await self._ws.close()
 
-    # ---------------------------------------------------------- Status
-    def _refresh(self, duid):
-        rob = self.robots[duid]
-        rec = self._rec(duid)
-        st = self.status.setdefault(duid, {"id": duid})
+    def _duid_for(self, robot_id):
+        if robot_id and PREFIX + str(robot_id) in self.robots:
+            return PREFIX + str(robot_id)
+        return next(iter(self.robots), None) if len(self.robots) == 1 else None
+
+    def _on_message(self, raw):
         try:
-            s = rob.get_robot_state().json()
-        except Exception as e:
-            st.update(id=duid, name=rec.get("name") or "Kobold", online=False, stateText="nicht erreichbar",
-                      error=None, kind="kobold")
-            print(f"[KOBOLD] Status: {e}", flush=True)
+            data = json.loads(raw)
+        except ValueError:
             return
-        state = STATE.get(s.get("state"), "invalid")
-        action = s.get("action") or 0
-        det = s.get("details") or {}
-        cleaning = state in ("busy", "paused") and action not in (5, 7, 8, 10)
-        docked = bool(det.get("isDocked"))
-        err = s.get("error") if state == "error" else None      # außerhalb von „Fehler" meldet die Cloud oft alte Fehler
-        err_text = _text(err, ERROR_DE) if err else None
-        if state == "error" and not err_text:
-            err_text = "Fehler – bitte am Roboter nachsehen"
-        alert = _text(s.get("alert"), ALERT_DE)
-        if state == "busy":
-            text = ACTION_DE.get(action, "aktiv")
-        elif state == "paused":
-            text = "pausiert"
-        elif state == "error":
-            text = "Fehler"
-        elif det.get("isCharging"):
-            text = "lädt"
-        elif docked:
-            text = "voll geladen" if (det.get("charge") or 0) >= 100 else "in der Station"
+        kind, rid, body = None, None, None
+        if isinstance(data, list) and len(data) >= 5:          # Phoenix: [join_ref, ref, topic, event, payload]
+            topic, event, payload = data[2], data[3], data[4] if isinstance(data[4], dict) else {}
+            rid = topic.split(":", 1)[1] if isinstance(topic, str) and topic.startswith("robots:") else None
+            if event == "phx_reply":
+                resp = payload.get("response") or {}
+                b = resp.get("body") if isinstance(resp, dict) else None
+                if payload.get("status") == "ok" and isinstance(b, dict) and ("state" in b or "details" in b):
+                    kind, body = "state", b
+            elif event in ("last_state", "state_changed"):
+                kind, body = "state", payload.get("body", payload.get("state"))
+            elif event == "cleaning_state":
+                kind, body = "cleaning", payload.get("body") or payload.get("state") or payload
+        elif isinstance(data, dict):                             # Companion: {"event_type": …, "payload": …}
+            et, payload = data.get("event_type"), data.get("payload")
+            rid = (payload or {}).get("robot_id") if isinstance(payload, dict) else None
+            if et == "state_changed":
+                kind, body = "state", (payload or {}).get("state")
+            elif et == "cleaning_state":
+                kind, body = "cleaning", (payload or {}).get("state")
+            elif et == "service_status" and isinstance(payload, dict):
+                print(f"[KOBOLD] Hinweis der Cloud: {payload.get('state')} – {payload.get('title')}", flush=True)
+        if not kind or not isinstance(body, dict):
+            return
+        duid = self._duid_for(rid)
+        if not duid:
+            return
+        if kind == "cleaning":
+            self.cleaning[duid] = body
         else:
-            text = "bereit"
-        fan = (self.state.get("fan") or {}).get(duid, "eco")
+            self.raw[duid] = body
+        self._update(duid)
+
+    # ---------------------------------------------------------- Status für die App
+    def _update(self, duid):
+        r = self.robots.get(duid) or {}
+        b = self.raw.get(duid)
+        st = self.status.setdefault(duid, {"id": duid})
+        if not b:
+            return
+        det = b.get("details") or {}
+        center = b.get("cleaning_center") or {}
+        cmds = {k for k, v in (b.get("available_commands") or {}).items() if v}
+        errs = [e for e in (b.get("errors") or []) if isinstance(e, dict) and e.get("code")
+                and e.get("severity") in (None, "", "error")]
+        state, action = b.get("state"), b.get("action")
+        docked = bool(det.get("is_docked"))
+        charging = bool(det.get("is_charging"))
+        if state == "error" or errs:
+            s, text = "error", "Fehler"
+        elif action in CLEANING_ACTIONS and state != "paused":
+            s, text = "cleaning", {"spot_cleaning": "Spot-Reinigung", "mapping": "kartiert", "fast_mapping": "kartiert",
+                                   "map_creation": "kartiert"}.get(action, "saugt")
+        elif action in RETURNING_ACTIONS:
+            s, text = "returning_home", "fährt zur Station"
+        elif state == "paused":
+            s, text = "paused", "pausiert"
+        elif docked or charging:
+            s, text = ("charging", "lädt") if charging else ("charging_complete", "in der Station")
+            if (det.get("charge") or 0) >= 100:
+                text = "voll geladen"
+        elif state == "busy":
+            s, text = "cleaning", "aktiv"
+        else:
+            s, text = "idle", "bereit (nicht in der Station)"
+        code = errs[0]["code"] if errs else None
+        base_err = center.get("base_error") or (center.get("bag_status") if center.get("bag_status") not in (None, "bag_ok") else None)
+        clean = self.cleaning.get(duid) or {}
+        runs = clean.get("runs") or []
+        area = sum(float((x.get("stats") or {}).get("area") or 0) for x in runs if isinstance(x, dict)) or None
+        t = clean.get("timing") or {}
+        minutes = None
+        try:
+            if t.get("start"):
+                end = t.get("end") if s not in ("cleaning", "paused", "returning_home") else None
+                t0 = datetime.fromisoformat(t["start"].replace("Z", "+00:00")).timestamp()
+                t1 = datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp() if end else time.time()
+                minutes = max(0, round((t1 - t0 - float(t.get("paused") or 0) - float(t.get("charging") or 0)) / 60))
+        except Exception:
+            pass
+        fan = (self.state.get("fan") or {}).get(duid, "auto")
         nav = (self.state.get("nav") or {}).get(duid, "normal")
-        meta = s.get("meta") or {}
-        ver = ((s.get("availableServices") or {}).get("houseCleaning") or "")
+        fans = r.get("fans") or list(FAN_DE)
         st.update(
-            id=duid, kind="kobold", name=rec.get("name") or "Kobold",
-            model=rec.get("model") or meta.get("modelName") or "Vorwerk Kobold",
-            online=True, local=False, via="Vorwerk-Cloud",
-            state="paused" if state == "paused" else (("cleaning" if action not in (4,) else "returning_home") if state == "busy"
-                                                     else ("error" if state == "error" else ("charging" if docked else "idle"))),
-            stateText=text, cleaning=cleaning, docked=docked, battery=det.get("charge"),
-            error=err_text, dockError=None, notice=alert,
-            fan=fan, fanText=FAN_DE[fan],
-            fanOptions=[{"id": k, "text": v} for k, v in FAN_DE.items()] if ver != "minimal-2" else [],
-            mode=nav, modeText=NAV_DE[nav],
-            modeOptions=[{"id": k, "text": v} for k, v in NAV_DE.items()] if ver in ("basic-3", "basic-4", "basic-2") else [],
-            rooms=[{"id": i + 1, "name": z["name"]} for i, z in enumerate(rec.get("zones") or [])],
-            scheduleOn=bool(det.get("isScheduleEnabled")),
-            features=["find", "rooms", "schedule"],
-            updated=int(time.time()))
-        self._next_zone(duid, st)
+            id=duid, kind="kobold", name=r.get("name") or "Kobold", model=r.get("model") or "Kobold VR7",
+            online=True, local=False, via="Vorwerk-Cloud", state=s, stateText=text,
+            cleaning=s in ("cleaning", "paused", "returning_home"), docked=docked or charging,
+            battery=det.get("charge"), cleanArea=area, cleanMinutes=minutes,
+            error=(ERROR_DE.get(code) or code.replace("_", " ")) if code else (text if s == "error" else None),
+            dockError=BASE_ERROR_DE.get(base_err, base_err.replace("_", " ")) if base_err else None,
+            fan=fan, fanText=FAN_DE.get(fan, fan), fanOptions=[{"id": k, "text": FAN_DE[k]} for k in fans],
+            mode=nav, modeText=NAV_DE.get(nav, nav),
+            modeOptions=[{"id": k, "text": v} for k, v in NAV_DE.items()] if r.get("extra_care") else [],
+            rooms=[{"id": i + 1, "name": x["name"]} for i, x in enumerate((self.state.get("rooms") or {}).get(duid) or [])],
+            commands=sorted(cmds), features=["find", "rooms"], updated=int(time.time()))
         self._notify(duid, st)
 
     def list(self):
@@ -302,105 +482,106 @@ class Kobold:
                 "devices": sorted(self.status.values(), key=lambda s: s.get("name") or "")}
 
     def refresh_now(self):
-        for duid in list(self.robots):
-            try:
-                self._refresh(duid)
-            except Exception:
-                pass
+        try:
+            self._run(self._request_state(), timeout=10)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- Steuern
-    def _start(self, duid, zone=None):
-        rob = self.robots[duid]
-        fan = FAN_CODE[(self.state.get("fan") or {}).get(duid, "eco")]
-        nav = NAV_CODE[(self.state.get("nav") or {}).get(duid, "normal")]
-        if zone:
-            r = rob.start_cleaning(mode=fan, navigation_mode=nav, category=4, boundary_id=zone["bid"], map_id=zone["map"])
+    async def _ability(self, duid, ability):
+        r = self.robots[duid]
+        return await self._orb("POST", f"/vendors/{VENDOR_ID}/robots/{r['serial']}/messages", {"ability": ability})
+
+    async def _start_clean(self, duid, plan=None, tracks=None):
+        fan = (self.state.get("fan") or {}).get(duid, "auto")
+        nav = (self.state.get("nav") or {}).get(duid, "normal")
+        settings = {"mode": fan, "navigation_mode": nav}
+        if plan and tracks:
+            runs = [{"settings": dict(settings), "map": {"floorplan_uuid": plan, "zone_uuid": t, "nogo_enabled": True}}
+                    for t in tracks]
         else:
-            r = rob.start_cleaning(mode=fan, navigation_mode=nav)
-        res = r.json()
-        if res.get("result") not in ("ok", None):
-            raise RuntimeError(_text(res.get("alert"), ALERT_DE) or res.get("result"))
+            maps = (self.robots[duid].get("maps") or [])
+            runs = [{"settings": settings,
+                     "map": {"floorplan_uuid": maps[0]["uuid"], "zone_uuid": None, "nogo_enabled": True} if len(maps) == 1 else None}]
+        await self._orb("POST", f"/robots/{self.robots[duid]['id']}/cleaning/v2", {"runs": runs, "ability": "cleaning.start"}, app=True)
+
+    async def _wait_cmd(self, duid, cmd, secs):
+        for _ in range(secs):
+            if cmd in set(self.status.get(duid, {}).get("commands") or []):
+                return True
+            await self._request_state(duid)
+            await asyncio.sleep(1)
+        return False
+
+    async def _command(self, duid, action, value):
+        st = self.status.get(duid) or {}
+        cmds = set(st.get("commands") or [])
+        if action == "start":
+            if "resume" in cmds and "start" not in cmds:
+                await self._ability(duid, "cleaning.resume")
+            else:
+                await self._start_clean(duid)
+        elif action == "pause":
+            await self._ability(duid, "cleaning.pause")
+        elif action in ("stop", "dock"):
+            if st.get("docked"):
+                if "cancel" in cmds:
+                    await self._ability(duid, "cleaning.cancel")
+                return
+            if "return_to_base" not in cmds:
+                if "pause" not in cmds:
+                    raise ValueError("Der Roboter ist nicht unterwegs und findet so nicht allein zurück – bitte in die Station setzen")
+                await self._ability(duid, "cleaning.pause")
+                if not await self._wait_cmd(duid, "return_to_base", 30):
+                    raise ValueError("Der Roboter nimmt „Zur Station“ gerade nicht an")
+            await self._ability(duid, "navigation.return_to_base")
+        elif action == "find":
+            await self._ability(duid, "utilities.find_me")
+        elif action == "rooms":
+            rooms = (self.state.get("rooms") or {}).get(duid) or []
+            ids = [int(x) for x in (value or {}).get("rooms", [])]
+            picked = [rooms[i - 1] for i in ids if 1 <= i <= len(rooms)]
+            if not picked:
+                raise ValueError("Keine Zone gewählt")
+            if len({x["map"] for x in picked}) > 1:
+                raise ValueError("Die Räume liegen auf verschiedenen Karten – bitte nur Räume einer Karte wählen")
+            tracks = [x["track"] for x in picked] * max(1, min(3, int((value or {}).get("repeat", 1))))
+            await self._start_clean(duid, picked[0]["map"], tracks)
+        elif action == "fan":
+            if value not in FAN_DE:
+                raise ValueError("Unbekannte Saugstufe")
+            self.state.setdefault("fan", {})[duid] = value
+            self._save()
+        elif action == "mode":
+            if value not in NAV_DE:
+                raise ValueError("Unbekannter Reinigungsmodus")
+            self.state.setdefault("nav", {})[duid] = value
+            self._save()
+        elif action == "water":              # Zeitpläne setzen ggf. Wassermenge – der VR7 wischt nicht
+            return
+        elif action == "rooms-reload":
+            await self._load_rooms()
+        else:
+            raise ValueError("Bei diesem Roboter nicht möglich")
+        await asyncio.sleep(1)
+        await self._request_state(duid)
 
     def command(self, duid, action, value=None):
         if duid not in self.robots:
             raise KeyError(duid)
-        rob = self.robots[duid]
-        st = self.status.get(duid) or {}
-        with self._lock:
-            if action == "start":
-                self._queue.pop(duid, None)
-                if st.get("state") == "paused":
-                    rob.resume_cleaning()
-                else:
-                    self._start(duid)
-            elif action == "pause":
-                rob.pause_cleaning()
-            elif action == "stop":
-                self._queue.pop(duid, None)
-                rob.stop_cleaning()
-            elif action == "dock":
-                self._queue.pop(duid, None)
-                if st.get("cleaning"):
-                    try:
-                        rob.pause_cleaning()
-                        time.sleep(2)
-                    except Exception:
-                        pass
-                rob.send_to_base()
-            elif action == "find":
-                rob.locate()
-            elif action == "rooms":
-                zones = self._rec(duid).get("zones") or []
-                ids = [int(x) for x in (value or {}).get("rooms", [])]
-                picked = [zones[i - 1] for i in ids if 1 <= i <= len(zones)]
-                if not picked:
-                    raise ValueError("Keine Zone gewählt")
-                picked = picked * max(1, min(3, int((value or {}).get("repeat", 1))))
-                self._start(duid, picked[0])
-                self._queue[duid] = {"zones": picked[1:], "started": time.time()}
-            elif action == "fan":
-                if value not in FAN_CODE:
-                    raise ValueError("Unbekannte Saugstufe")
-                self.state.setdefault("fan", {})[duid] = value
-                self._save()
-            elif action == "mode":
-                if value not in NAV_CODE:
-                    raise ValueError("Unbekannter Reinigungsmodus")
-                self.state.setdefault("nav", {})[duid] = value
-                self._save()
-            elif action == "schedule":
-                rob.enable_schedule() if value else rob.disable_schedule()
-            elif action == "water":                  # Zeitpläne setzen ggf. Wassermenge – der Kobold wischt nicht
-                return
-            elif action == "zones-reload":
-                self._load_zones(duid)
-            else:
-                raise ValueError("Bei diesem Roboter nicht möglich")
         try:
-            self._refresh(duid)
-        except Exception:
-            pass
-
-    def _next_zone(self, duid, st):
-        """Mehrere Zonen nacheinander: nächste starten, sobald der Roboter wieder in der Station steht"""
-        q = self._queue.get(duid)
-        if not q:
-            return
-        if not q["zones"] or st.get("error"):
-            self._queue.pop(duid, None)
-            return
-        if time.time() - q["started"] > 90 and st.get("docked") and not st.get("cleaning"):
-            z = q["zones"].pop(0)
-            q["started"] = time.time()
-            try:
-                self._start(duid, z)
-                print(f"[KOBOLD] nächste Zone: {z['name']}", flush=True)
-            except Exception as e:
-                print(f"[KOBOLD] Zone {z['name']}: {e}", flush=True)
-                self._queue.pop(duid, None)
+            self._run(self._command(duid, action, value), timeout=60)
+        except KoboldError as e:
+            msg = str(e)
+            if "503" in msg:
+                raise ValueError("Der Roboter nimmt den Befehl gerade nicht an")
+            raise
+        st = self.status.get(duid)
+        if st and action in ("fan", "mode"):
+            self._update(duid)
 
     def map(self, duid, fresh=False):
-        raise ValueError("Für den Vorwerk Kobold gibt es keine Kartenansicht")
+        raise ValueError("Für den Vorwerk Kobold gibt es hier keine Kartenansicht")
 
     def zone_payload(self, duid, zones, repeat=1):
         raise ValueError("Zonen zeichnen geht beim Vorwerk Kobold nur in der MyKobold-App")
@@ -419,7 +600,7 @@ class Kobold:
         today = datetime.now().strftime("%Y-%m-%d")
         if self.state.get("auto_away_last") == today or not 8 <= datetime.now().hour < 20:
             return
-        for duid, st in self.status.items():
+        for duid, st in list(self.status.items()):
             if st.get("docked") and not st.get("error") and (st.get("battery") or 0) >= 50:
                 try:
                     self.command(duid, "start")
@@ -429,23 +610,7 @@ class Kobold:
                 except Exception as e:
                     print(f"[KOBOLD] Auto-Start: {e}", flush=True)
 
-    # ---------------------------------------------------------- Hintergrund + Mitteilungen
-    def _poller(self):
-        time.sleep(20)
-        last_zones = time.time()
-        while True:
-            busy = any(s.get("cleaning") for s in self.status.values())
-            for duid in list(self.robots):
-                try:
-                    self._refresh(duid)
-                except Exception as e:
-                    print(f"[KOBOLD] Abfrage: {e}", flush=True)
-            if self.robots and time.time() - last_zones > 6 * 3600:      # neue Zonen aus der MyKobold-App übernehmen
-                last_zones = time.time()
-                for duid in list(self.robots):
-                    self._load_zones(duid)
-            time.sleep(20 if busy else 60)
-
+    # ---------------------------------------------------------- Mitteilungen
     def _send(self, title, body):
         if self.push is not None and self.push.configured:
             n = self.push.send("vacuum", title, body)
@@ -457,10 +622,11 @@ class Kobold:
         if prev is None or not st.get("online"):
             return
         name = st.get("name") or "Kobold"
-        if prev.get("cleaning") and not st.get("cleaning") and st.get("docked") and not st.get("error") \
-                and not (self._queue.get(duid) or {}).get("zones"):
-            self._send(f"🧹 {name} ist fertig", "Zurück in der Station")
+        if prev.get("cleaning") and not st.get("cleaning") and st.get("docked") and not st.get("error"):
+            area = st.get("cleanArea")
+            self._send(f"🧹 {name} ist fertig",
+                       f"{area:.0f} m² in {st.get('cleanMinutes') or 0} min" if area else "Zurück in der Station")
         if st.get("error") and st.get("error") != prev.get("error"):
             self._send(f"⚠️ {name} braucht Hilfe", st["error"])
-        if st.get("notice") == "Staubbehälter voll" and prev.get("notice") != st.get("notice"):
-            self._send(f"🗑️ {name}: Staubbehälter voll", "Bitte den Staubbehälter leeren.")
+        if st.get("dockError") and st.get("dockError") != prev.get("dockError"):
+            self._send(f"🗑️ {name}: {st['dockError']}", "Bitte an der Station nachsehen.")

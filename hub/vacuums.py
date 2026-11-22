@@ -8,6 +8,7 @@ Anbindung weitergereicht. Vorwerk-Geräte erkennt man an der ID „kobold-…".
 class Vacuums:
     def __init__(self, roborock, kobold):
         self.roborock, self.kobold = roborock, kobold
+        self.away = None          # away_clean.AwayClean – „Wenn alle weg sind, saugen“ für alle Roboter (ab Hub 2.58)
 
     def _of(self, duid):
         return self.kobold if self.kobold.owns(duid) else self.roborock
@@ -31,8 +32,9 @@ class Vacuums:
         if not parts:
             return {"configured": False, "error": None, "autoAway": False, "devices": []}
         devs = sorted([d for x in parts for d in x["devices"]], key=lambda s: s.get("name") or "")
+        auto = self.away.cfg["enabled"] if self.away else any(x.get("autoAway") for x in parts)
         return {"configured": True, "error": next((x["error"] for x in parts if x.get("error")), None),
-                "autoAway": any(x.get("autoAway") for x in parts), "devices": devs}
+                "autoAway": auto, "devices": devs}
 
     def command(self, duid, action, value=None):
         return self._of(duid).command(duid, action, value)
@@ -50,11 +52,15 @@ class Vacuums:
         return (self.roborock.app_timers() if self.roborock.configured else []) + self.kobold.app_timers()
 
     def set_auto_away(self, on):
+        if self.away:
+            return self.away.set_enabled(on)
         for v in (self.roborock, self.kobold):
             if v.configured:
                 v.set_auto_away(on)
 
     def on_presence(self, all_away):
+        if self.away:
+            return self.away.on_presence(all_away)
         for v in (self.roborock, self.kobold):
             if v.configured:
                 v.on_presence(all_away)

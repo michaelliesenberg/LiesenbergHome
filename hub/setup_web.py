@@ -1081,9 +1081,9 @@ def attach(app, ctx):
         v = CTX.get("kobold")
         if v is None:
             return ""
-        intro = ('<p class=muted>Vorwerk-Kobold-Saugroboter (VR300/VR200, MyKobold-App) steuern: Status, Start/Stopp, Station, '
-                 'Zonen aus der MyKobold-Karte. Anmeldung mit der E-Mail deiner MyKobold-App – Vorwerk schickt dir einen Code '
-                 'per Mail. Kein Passwort nötig; gespeichert werden nur Token und Geräteschlüssel, und zwar nur auf dem Hub.</p>')
+        intro = ('<p class=muted>Vorwerk-Kobold-Saugroboter VR7 (MyKobold-App) steuern: Status live, Start/Pause, Station, Finden, '
+                 'Räume aus der MyKobold-Karte. Anmeldung mit der E-Mail deiner MyKobold-App – Vorwerk schickt dir einen Code '
+                 'per Mail. Kein Passwort nötig; gespeichert wird nur das Anmelde-Token, und zwar nur auf dem Hub.</p>')
         if v.configured:
             lst = v.list()
             devs = "".join(f'<li>{E(d.get("name") or d["id"])} – {E(d.get("stateText") or "")}'
