@@ -2040,6 +2040,50 @@ kobold = _kobold.Kobold(push)
 vacuum = _vacuums.Vacuums(roborock, kobold)       # Roborock + Vorwerk Kobold in einer Liste (ab Hub 2.57)
 
 
+# Vorwerk-Anmeldung direkt aus der App (ab Hub 2.59) – nur Besitzer; gleicher Ablauf wie auf der Einrichtungsseite
+class KoboldEmail(BaseModel):
+    email: str
+
+
+class KoboldCode(BaseModel):
+    code: str
+
+
+@app.get("/api/vacuum-account/kobold")
+def kobold_account(p=Depends(owner)):
+    return {"configured": kobold.configured, "email": kobold.state.get("email") or "", "error": kobold.error,
+            "robots": [{"id": d, "name": r.get("name"), "model": r.get("model")} for d, r in kobold.robots.items()]}
+
+
+@app.post("/api/vacuum-account/kobold/code")
+def kobold_account_code(body: KoboldEmail, p=Depends(owner)):
+    try:
+        kobold.request_code(body.email)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vorwerk: {e}")
+    return {"ok": True}
+
+
+@app.post("/api/vacuum-account/kobold/login")
+def kobold_account_login(body: KoboldCode, p=Depends(owner)):
+    try:
+        kobold.login(body.code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vorwerk: {e}")
+    print(f"[KOBOLD] {p['name']}: angemeldet ({len(kobold.robots)} Roboter)", flush=True)
+    return kobold_account(p)
+
+
+@app.delete("/api/vacuum-account/kobold")
+def kobold_account_logout(p=Depends(owner)):
+    kobold.logout()
+    return {"ok": True}
+
+
 @app.get("/api/vacuum")
 def vacuum_list(p=Depends(person)):
     return vacuum.list()

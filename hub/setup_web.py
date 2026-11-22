@@ -909,7 +909,7 @@ def attach(app, ctx):
         login = _form("/setup/hc/login", "", csrf, "Mit Home Connect anmelden") if c["client_id"] else ""
         ready = '<p class=ok>✓ angemeldet</p>' if CTX["homeconnect"].auth.ready else ""
         return _page("Hausgeräte", _flash(tok) + f'<div class=card><h2>Bosch / Siemens Home Connect</h2>{steps}{form}{status}{login}{ready}</div>'
-                     + _miele_card(csrf) + _lg_card(csrf) + _roborock_card(csrf) + _kobold_card(csrf) + _mammotion_card(csrf), "geraete", csrf)
+                     + _miele_card(csrf) + _lg_card(csrf) + _roborock_card(csrf) + _mammotion_card(csrf), "geraete", csrf)
 
     def _lg_card(csrf):
         lg = CTX.get("lg")
