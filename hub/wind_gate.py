@@ -13,6 +13,13 @@ dieselben, auf die die Jalousien und Markisen mit „Teilnahme Windalarm“ hoch
 
 Nach dem Windalarm geht das Tor nicht wieder auf. Einstellung in config.json → "wind_gate":
   {"enabled": true, "gates": ["sued"]}     # sued = Tor Süd (Michael 17.11.: nur Süd); seit 20.11. Süd = außen, Nord = innen
+
+Auslöser (Michael 24.11.): „Windalarm 2“ der Wetterstation hat eine sehr niedrige Schwelle (war bei 0–10 kn dauernd an),
+LUXORliving zeigt ihn nicht → Tor ging „von selbst“ zu. Deshalb misst der Hub jetzt selbst (source "speed", Standard):
+  Windstärke (IP1-Dp 1, Knoten) alle 5 s; Windalarm, wenn der DURCHSCHNITT der letzten "seconds" Sekunden ≥ "kmh" ist –
+  eine einzelne Böe reicht nicht. Vorbei, wenn der Durchschnitt "clear_min" Minuten lang unter der Schwelle bleibt.
+  {"source": "speed", "kmh": 40, "seconds": 60, "clear_min": 10}
+  source "knx" = wie 2.54: KNX-Windalarm 1/2 (Dp 2/3) der Wetterstation.
 Zustand in DATA_DIR/wind-gate.json.
 """
 import json
@@ -28,7 +35,9 @@ ALARM_DPS = (2, 3)                       # Wetterstation 1 C1/C2 „Windalarm“
 POLL = 5.0
 QUIET = 1800.0                           # Alarm flattert, Tor schon zu → höchstens alle 30 min eine Mitteilung
 STEPS = [{"pulse": "open"}, {"wait": 1.5}, {"pulse": "step"}, {"wait": 2.0}, {"pulse": "step"}]
-DEFAULT = {"enabled": True, "gates": ["sued"]}
+SPEED_DP = 1                             # Wetterstation „Windstärke“ in Knoten (house_server._WEATHER_DP)
+KN_KMH = 1.852
+DEFAULT = {"enabled": True, "gates": ["sued"], "source": "speed", "kmh": 40, "seconds": 60, "clear_min": 10}
 
 
 def plan(est, memo_seen):
@@ -50,6 +59,9 @@ class WindGate:
         self.gates, self.read_fn, self.push_fn, self.cfg_fn = gates, read_fn, push_fn, cfg_fn
         self.sleep_fn, self.clock = sleep_fn, clock
         self._lock = threading.Lock()
+        self._samples = []                     # [(Zeit, km/h)] fürs Fenster
+        self._below = None                     # seit wann der Schnitt unter der Schwelle liegt (Alarm an)
+        self.avg = None
         self.s = {"alarm": None, "since": None, "closed": {}, "last": None, "pushed": None}
         try:
             with open(FILE) as f:
@@ -77,6 +89,12 @@ class WindGate:
 
     def read_alarm(self):
         """→ True/False, None = nicht lesbar."""
+        if self.cfg().get("source", "speed") == "speed":
+            try:
+                v = self.read_fn(SPEED_DP)
+            except Exception:
+                v = None
+            return self.speed_alarm(float(v) * KN_KMH if isinstance(v, (int, float)) else None)
         vals = []
         for dp in ALARM_DPS:
             try:
@@ -86,6 +104,31 @@ class WindGate:
         if any(v for v in vals if v is not None):
             return True
         return False if any(v is not None for v in vals) else None
+
+    def speed_alarm(self, kmh, now=None):
+        """Ein Messwert (km/h oder None) → Alarm True/False (None = zu wenig Daten). Schnitt über das Fenster."""
+        c, now = self.cfg(), self.clock() if now is None else now
+        win, lim = float(c.get("seconds") or 60), float(c.get("kmh") or 40)
+        clear = float(c.get("clear_min") or 10) * 60
+        if kmh is not None:
+            self._samples.append((now, kmh))
+        self._samples = [(t, v) for t, v in self._samples if now - t <= win]
+        if not self._samples:
+            self.avg = None
+            return None
+        self.avg = round(sum(v for _, v in self._samples) / len(self._samples), 1)
+        covered = now - self._samples[0][0] >= win * 0.8 and len(self._samples) >= 3
+        if self.s["alarm"]:
+            if self.avg >= lim:
+                self._below = None
+                return True
+            self._below = self._below or now
+            return not (now - self._below >= clear)
+        self._below = None
+        if covered and self.avg >= lim:
+            print(f"[WIND] Schnitt {self.avg:.0f} km/h über {win:.0f} s ≥ {lim:.0f} km/h", flush=True)
+            return True
+        return False if covered else None
 
     # ---- Ablauf
     def check(self, alarm):
@@ -97,7 +140,7 @@ class WindGate:
         if alarm and prev is not True:
             self.s["since"] = self.clock()
             self._save()
-            print("[WIND] Windalarm der Wetterstation", flush=True)
+            print("[WIND] Windalarm" + (f" (Schnitt {self.avg:.0f} km/h)" if self.avg is not None else ""), flush=True)
             if self.cfg().get("enabled", True):
                 return self.trigger("Windalarm")
             print("[WIND] Tor-Automatik aus (wind_gate.enabled)", flush=True)
@@ -122,7 +165,10 @@ class WindGate:
                 todo.append((k, g, steps))
         names_do = [g["name"] for _, g, _ in todo]
         names_ok = [gates[k]["name"] for k in keys if k not in [t[0] for t in todo]]
-        body = "Die Wetterstation meldet Windalarm, Jalousien fahren hoch."
+        if self.cfg().get("source", "speed") == "speed" and self.avg is not None:
+            body = f"Wind im Schnitt {self.avg:.0f} km/h."
+        else:
+            body = "Die Wetterstation meldet Windalarm, Jalousien fahren hoch."
         if names_do:
             body += f" {' und '.join(names_do)} wird geschlossen."
         elif names_ok:
@@ -179,5 +225,5 @@ class WindGate:
         threading.Thread(target=run, daemon=True).start()
 
     def info(self):
-        return {"alarm": self.s["alarm"], "since": self.s["since"], "config": self.cfg(), "last": self.s["last"],
+        return {"alarm": self.s["alarm"], "since": self.s["since"], "config": self.cfg(), "last": self.s["last"], "avgKmh": self.avg,
                 "closed": self.s["closed"]}

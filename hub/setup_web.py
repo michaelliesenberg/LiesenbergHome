@@ -360,6 +360,7 @@ def attach(app, ctx):
                 + _doorbird_card(c, csrf)
                 + _judo_card(c, csrf)
                 + _gate_pico_card(c, csrf)
+                + _wind_gate_card(c, csrf)
                 + names)
         return _page("Geräte", body, "haus", csrf)
 
@@ -688,6 +689,43 @@ def attach(app, ctx):
             st = (f'<p class=ok>✓ online: {E(i.get("text") or "")}, Firmware {E(i.get("version") or "?")}</p>' if i.get("online")
                   else f'<p class=bad>offline: {E(i.get("error") or "verbindet …")}</p>')
         return f'<div class=card><h2>Tor-Rückmeldung (Tor-Pico)</h2>{form}{st}</div>'
+
+    def _wind_gate_card(c, csrf):
+        d = {"enabled": True, "gates": ["sued"], "source": "speed", "kmh": 40, "seconds": 60, "clear_min": 10,
+             **(c.get("wind_gate") or {})}
+        src = "".join(f'<option value="{k}" {"selected" if d.get("source") == k else ""}>{n}</option>'
+                      for k, n in (("speed", "Windstärke messen (Hub)"), ("knx", "KNX-Windalarm der Wetterstation")))
+        chk = lambda name, on, label: (f'<label style="display:flex;gap:8px;align-items:center;color:var(--text)">'
+                                       f'<input style="width:auto" type=checkbox name={name} value=1 {"checked" if on else ""}>{E(label)}</label>')
+        gates = d.get("gates") or []
+        form = _form("/setup/wind_gate/save",
+                     chk("enabled", d.get("enabled", True), "Bei Windalarm Tor schließen")
+                     + chk("g_sued", "sued" in gates, "Tor Süd") + chk("g_nord", "nord" in gates, "Tor Nord")
+                     + f'<label>Auslöser</label><select name=source>{src}</select>'
+                     + '<div class=row><div>' + _field("kmh", "Windalarm ab km/h (Durchschnitt)", d.get("kmh"), "number")
+                     + '</div><div>' + _field("seconds", "über Sekunden", d.get("seconds"), "number")
+                     + '</div><div>' + _field("clear_min", "vorbei nach Minuten ruhig", d.get("clear_min"), "number") + '</div></div>',
+                     csrf, "Speichern")
+        return (f'<div class=card><h2>Wind → Tor</h2><p class=muted>Einzelne Böen lösen nicht aus – zählt der Durchschnitt '
+                f'über die eingestellten Sekunden. Das Tor geht danach nicht von selbst wieder auf.</p>{form}</div>')
+
+    @app.post("/setup/wind_gate/save")
+    async def wind_gate_save(request: Request):
+        f = await request.form()
+
+        def num(k, default, lo, hi):
+            try:
+                v = max(lo, min(hi, float(str(f.get(k) or "").replace(",", "."))))
+                return int(v) if v == int(v) else v
+            except ValueError:
+                return default
+        ch = {"enabled": bool(f.get("enabled")),
+              "gates": [k for k in ("sued", "nord") if f.get("g_" + k)],
+              "source": f.get("source") if f.get("source") in ("speed", "knx") else "speed",
+              "kmh": num("kmh", 40, 5, 200), "seconds": num("seconds", 60, 5, 1800),
+              "clear_min": num("clear_min", 10, 1, 240)}
+        hub_config.update({"wind_gate": ch})
+        return _done(request.state.tok, "haus", True, "Wind → Tor gespeichert.")
 
     @app.post("/setup/gate_pico/save")
     async def gate_pico_save(request: Request):

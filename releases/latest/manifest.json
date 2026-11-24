@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.61.0",
- "file": "hub-2.61.0.tar.gz",
- "sha256": "58c807d2cd45421e26ed7c81761f7be04ebf778ecc7bf8ccfb3d0a501a994a52",
+ "version": "2.62.0",
+ "file": "hub-2.62.0.tar.gz",
+ "sha256": "8d21a27f5e46256536c1bd5645a03840b858ac672abc5a20a4a786469022e9eb",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -59,6 +59,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Gesicht in der App einscannen",
- "created": 1795515853
+ "notes": "Windalarm aus der Windst\u00e4rke: Durchschnitt \u00fcber X Sekunden, B\u00f6en l\u00f6sen nicht aus",
+ "created": 1795532241
 }
