@@ -38,6 +38,8 @@ class DoorBird:
         self.info = {}
         self.on_ring = None            # optional: weitere Aktion beim Klingeln (z. B. Licht)
         self.on_ring_start = None      # optional: sofort beim Klingeln, vor Bild und Push (Türgong auf den HomePods)
+        self.faces = None              # optional: faces.Faces – Gesichter im Klingel-Bild erkennen (nur für den Text der Push)
+        self._scanning = False
         self._last_ring = 0
         self._last_scan = 0
         self._fails = 0
@@ -132,6 +134,9 @@ class DoorBird:
             time.sleep(0.7)
             img = self.snapshot()
         entry = {"id": rid, "ts": int(now), "image": bool(img), "test": bool(test)}
+        found = self._identify(img)
+        if found is not None:
+            entry["faces"] = found
         with self._lock:
             if img:
                 with open(os.path.join(DIR, f"{rid}.jpg"), "wb") as f:
@@ -147,17 +152,61 @@ class DoorBird:
         data = {"door": rid}
         if img:
             data["image"] = f"api/doorbird/snapshot/{rid}"
-        title = "Es klingelt" + (" (Test)" if test else "")
+        import faces as _faces
+        who = _faces.headline(found)
+        if who:
+            data["who"] = [f["name"] for f in found if f.get("name")]
+        title = (who or "Es klingelt") + (" (Test)" if test else "")
         self.push.send("door", title, f"An der Haustür · {datetime.now().strftime('%H:%M')}",
                        person_ids=only, data=data,
                        aps_extra={"mutable-content": 1, "interruption-level": "time-sensitive"})
-        print(f"[DOORBIRD] Klingeln{' (Test)' if test else ''} – Bild: {'ja' if img else 'nein'}", flush=True)
+        print(f"[DOORBIRD] Klingeln{' (Test)' if test else ''} – Bild: {'ja' if img else 'nein'}"
+              + (f" – {who}" if who else ""), flush=True)
         if self.on_ring and not test:
             try:
                 self.on_ring()
             except Exception as e:
                 print(f"[DOORBIRD] on_ring: {e}", flush=True)
         return entry
+
+    # ---- Gesichter (nur Anzeige – öffnet nie die Tür)
+    def _identify(self, img):
+        """Gesichter im Bild oder None (Erkennung aus / nicht bereit / Fehler). Darf das Klingeln nie aufhalten."""
+        if not (img and self.faces and self.faces.enabled and self.faces.ready):
+            return None
+        try:
+            return self.faces.identify(img)
+        except Exception as e:
+            print(f"[DOORBIRD] Gesichtserkennung: {e}", flush=True)
+            return None
+
+    def rescan_faces(self, only_missing=False):
+        """Gespeicherte Klingel-Bilder (neu) durchsuchen – nach dem Einschalten und nach dem Anlernen. Läuft im Hintergrund."""
+        if self._scanning:
+            return
+        self._scanning = True
+
+        def run():
+            try:
+                for e in list(self.rings):
+                    if only_missing and "faces" in e:
+                        continue
+                    p = self.image_path(e["id"])
+                    if not p:
+                        continue
+                    with open(p, "rb") as f:
+                        found = self._identify(f.read())
+                    if found is not None:
+                        e["faces"] = found
+                with self._lock:
+                    self._save()
+            finally:
+                self._scanning = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def ring_by_id(self, rid):
+        return next((r for r in self.rings if r["id"] == str(rid)), None)
 
     def state(self):
         c = self._cfg()

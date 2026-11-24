@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.59.0",
- "file": "hub-2.59.0.tar.gz",
- "sha256": "ac7321ca9d7ab9d29291265e75eac8f87b46e5866cdfd6b355204ceb17c57c92",
+ "version": "2.60.0",
+ "file": "hub-2.60.0.tar.gz",
+ "sha256": "c34453fdcd77398559c4ddf46df329d530cfcd988a974ba8c9563531c50811ac",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -14,6 +14,7 @@
   "doorbell_chime.py",
   "doorbird.py",
   "energy_log.py",
+  "faces.py",
   "forecast.py",
   "gate_ped.py",
   "gate_pico.py",
@@ -58,6 +59,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Vorwerk-Anmeldung in der App",
- "created": 1795343773
+ "notes": "Klingel: Gesichtserkennung nur f\u00fcr den Push-Text",
+ "created": 1795512606
 }

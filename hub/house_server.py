@@ -19,7 +19,7 @@ App-API (Authorization: Bearer <persönlicher Schlüssel>):
   GET/POST/PUT/DELETE /api/people  – Personen & Einladungen (nur Besitzer)
   GET  /api/backup                 – komplette Sicherung als .tgz (nur Besitzer)
   GET  /api/hub/version · POST /api/hub/update – Version prüfen / aktualisieren (Update: Besitzer + Vollzugriff)
-  GET  /api/doorbird · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test · POST /api/doorbird/chime/test – Türklingel (DoorBird) + Gong auf den HomePods
+  GET  /api/doorbird · (Gesichtserkennung für den Push-Text: faces.py) · /api/doorbird/snapshot/{id} · /api/doorbird/live · POST /api/doorbird/test · POST /api/doorbird/chime/test – Türklingel (DoorBird) + Gong auf den HomePods
   GET  /api/water · POST /api/water/valve {"open"} · /api/water/vacation {"on"} · /api/water/regenerate – Enthärtung (JUDO)
   GET  /api/water/summary?period=day|month|year&date= · GET/PUT /api/water/prices (€/m³ Wasser, Abwasser, Grundgebühr/Jahr)
   POST /api/water/lock_ok – Verdacht „Leckageschutz hat abgesperrt“ verwerfen (ab 2.55)
@@ -2653,6 +2653,14 @@ import doorbell_chime as _chime  # noqa: E402
 chime = _chime.Chime(lambda: (hub_config.get("doorbird") or {}).get("chime") or {}, music)
 doorbird.on_ring_start = chime.ring_async
 
+# Gesichtserkennung: nur für den Text der Klingel-Push („Jo steht vor der Tür“) – öffnet nie die Tür (faces.py)
+import faces as _faces  # noqa: E402
+
+faces = _faces.Faces(lambda: (hub_config.get("doorbird") or {}).get("faces") or {},
+                     lambda ch: hub_config.update({"doorbird": {"faces": ch}}))
+doorbird.faces = faces
+faces.on_ready = lambda: doorbird.rescan_faces(only_missing=True)
+
 
 def _jpeg(data):
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
@@ -2822,7 +2830,7 @@ def attention_list(p=Depends(person)):
 
 setup_web.attach(app, ctx={"luxor": luxor, "home": home, "daikin": daikin, "homeconnect": homeconnect, "push": push,
                            "vacuum": roborock, "kobold": kobold, "mower": mower, "miele": miele, "lg": lg, "updater": lambda: updater,
-                           "nightheat": nightheat, "doorbird": doorbird, "gate_pico": gate_pico, "chime": chime, "music": music, "judo": judo,
+                           "nightheat": nightheat, "doorbird": doorbird, "faces": faces, "gate_pico": gate_pico, "chime": chime, "music": music, "judo": judo,
                            "invite_link": invite_link, "local_url": local_url, "version": VERSION,
                            "reset_backend": lambda: _backend.update(key=None)})
 

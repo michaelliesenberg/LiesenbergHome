@@ -381,7 +381,151 @@ def attach(app, ctx):
             st = (f'<p class=ok>✓ verbunden mit {E(d.get("host") or "")} – wartet aufs Klingeln</p>' if db.connected
                   else f'<p class=bad>{E(db.error or "verbindet …")}</p>')
             st += _form("/setup/doorbird/test", "", csrf, "Probe-Klingeln (Push an alle mit Abo „Klingel“)")
-        return f'<div class=card><h2>Türklingel (DoorBird)</h2>{steps}{form}{st}{_chime_part(csrf)}</div>'
+        return f'<div class=card><h2>Türklingel (DoorBird)</h2>{steps}{form}{st}{_chime_part(csrf)}{_faces_part(csrf)}</div>'
+
+    # ---------------------------------------------------------------- Gesichter an der Klingel (faces.py)
+    def _mini(action, inner, csrf, button, cls=""):
+        return (f'<form method=post action="{action}?csrf={csrf}" style="display:inline">{inner}'
+                f'<button class="{cls}" style="margin-top:4px;padding:4px 10px;font-size:13px">{E(button)}</button></form>')
+
+    def _faces_part(csrf):
+        fc = CTX.get("faces")
+        if fc is None:
+            return ""
+        intro = ('<h3>Gesichter erkennen</h3><p class=muted>Erkennt der Hub im Klingel-Bild jemanden, den du angelernt hast, '
+                 'steht in der Mitteilung z. B. <b>„Jo steht vor der Tür“</b> statt „Es klingelt“. '
+                 '<b>Die Tür öffnet sich dadurch nie</b> – ein Foto vor der Kamera würde sonst reichen. '
+                 'Alles läuft auf dem Hub, nichts geht in eine Cloud. Gespeichert werden nur die angelernten Personen.</p>')
+        toggle = _form("/setup/faces/enable",
+                       f'<label style="display:flex;gap:6px;align-items:center"><input style="width:auto" type=checkbox name=enabled value=1 '
+                       f'{"checked" if fc.enabled else ""}>Gesichter im Klingel-Bild erkennen</label>'
+                       '<div class="muted" style="font-size:12px">Beim ersten Einschalten lädt der Hub OpenCV und zwei Modelle (ca. 80 MB) – '
+                       'das dauert ein paar Minuten. Seite danach neu laden.</div>', csrf)
+        if not fc.enabled:
+            return intro + toggle
+        if not fc.ready:
+            st = (f'<p class=bad>{E(fc.error)}</p>' if fc.error else f'<p class=muted>⏳ {E(fc.status)}</p>')
+            return intro + toggle + st
+        db = CTX["doorbird"]
+        names = [p["name"] for p in fc.people()]
+        dl = '<datalist id=facenames>' + "".join(f'<option value="{E(n)}">' for n in names) + '</datalist>'
+        # angelernte Personen
+        rows = ""
+        for p in fc.people():
+            thumbs = "".join(
+                f'<span style="display:inline-block;text-align:center;margin:0 6px 6px 0">'
+                f'<img src="/setup/faces/thumb/{E(x["id"])}" style="width:56px;height:56px;object-fit:cover;border-radius:10px;display:block">'
+                + _mini("/setup/faces/remove", f'<input type=hidden name=name value="{E(p["name"])}"><input type=hidden name=sid value="{E(x["id"])}">',
+                        csrf, "×", "btn2") + '</span>' for x in p["samples"])
+            rows += (f'<tr><td style="vertical-align:top;width:120px"><b>{E(p["name"])}</b><br><span class=muted>{len(p["samples"])} Bild(er)</span><br>'
+                     + _mini("/setup/faces/remove", f'<input type=hidden name=name value="{E(p["name"])}">', csrf, "Person löschen", "danger")
+                     + f'</td><td>{thumbs}</td></tr>')
+        known = (f'<table>{rows}</table>' if rows else '<p class=muted>Noch niemand angelernt.</p>')
+        upload = _form("/setup/faces/upload",
+                       '<div class=row><div><label>Name</label><input name=name list=facenames placeholder="z. B. Jo"></div>'
+                       '<div><label>Fotos (gut sichtbares Gesicht, gern mehrere)</label><input type=file name=photo accept="image/jpeg,image/png" multiple></div></div>',
+                       csrf, "Anlernen", "multipart/form-data")
+        # Gesichter aus früheren Klingel-Bildern zuordnen
+        cards = ""
+        for r in db.rings:
+            for i, f in enumerate(r.get("faces") or []):
+                if len(cards) > 60000:
+                    break
+                lab = (f'<span class=ok>{E(f["name"])}</span>' if f.get("name")
+                       else '<span class=muted>unbekannt</span>')
+                when = time.strftime("%d.%m. %H:%M", time.localtime(r["ts"]))
+                cards += (f'<div style="display:inline-block;vertical-align:top;width:150px;margin:0 8px 10px 0">'
+                          f'<img src="/setup/faces/ring/{E(r["id"])}/{i}" style="width:96px;height:96px;object-fit:cover;border-radius:12px;display:block">'
+                          f'<div style="font-size:12px">{when} · {lab}</div>'
+                          + _mini("/setup/faces/assign", f'<input type=hidden name=rid value="{E(r["id"])}"><input type=hidden name=i value={i}>'
+                                  f'<input name=name list=facenames placeholder="Wer ist das?" style="padding:4px 8px;font-size:13px">', csrf, "Zuordnen", "btn2")
+                          + '</div>')
+        scan = '<p class=muted>⏳ Klingel-Bilder werden durchsucht – Seite gleich neu laden.</p>' if db._scanning else ""
+        rings = (f'<h3 style="margin-top:14px">Gesichter aus den letzten Klingel-Bildern</h3>{scan}'
+                 + (cards or '<p class=muted>In den gespeicherten Klingel-Bildern ist (noch) kein Gesicht zu sehen. '
+                    'Tipp: vor die DoorBird stellen und oben „Probe-Klingeln“ drücken.</p>'))
+        return (intro + toggle + '<p class=ok>✓ bereit</p>' + dl + '<h3>Angelernt</h3>' + known
+                + '<h3 style="margin-top:14px">Foto hochladen</h3>' + upload + rings
+                + '<p class=muted style="font-size:12px">3–5 Bilder je Person helfen (Tag/Abend, mit Mütze oder Brille). '
+                  'Wird jemand falsch erkannt, das falsche Bild bei der Person löschen.</p>')
+
+    @app.post("/setup/faces/enable")
+    async def faces_enable(request: Request):
+        f = await request.form()
+        on = bool(f.get("enabled"))
+        CTX["faces"].enable(on)
+        return _done(request.state.tok, "haus", True,
+                     "Gesichtserkennung wird eingerichtet – das dauert ein paar Minuten." if on and not CTX["faces"].ready
+                     else ("Gesichtserkennung an." if on else "Gesichtserkennung aus."))
+
+    @app.get("/setup/faces/thumb/{sid}")
+    def faces_thumb(sid: str):
+        p = CTX["faces"].thumb_path(sid)
+        if not p:
+            return Response(status_code=404)
+        with open(p, "rb") as fh:
+            return Response(fh.read(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/setup/faces/ring/{rid}/{i}")
+    def faces_ring_crop(rid: str, i: int):
+        db, fc = CTX["doorbird"], CTX["faces"]
+        r, p = db.ring_by_id(rid), db.image_path(rid)
+        fl = (r or {}).get("faces") or []
+        if not p or not (0 <= i < len(fl)):
+            return Response(status_code=404)
+        with open(p, "rb") as fh:
+            data = fc.crop(fh.read(), fl[i]["box"], 192)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}) if data else Response(status_code=404)
+
+    @app.post("/setup/faces/upload")
+    async def faces_upload(request: Request):
+        f = await request.form()
+        name = (f.get("name") or "").strip()
+        ok, bad = 0, []
+        for up in f.getlist("photo"):
+            if not getattr(up, "filename", ""):
+                continue
+            data = await up.read()
+            if len(data) > 25_000_000:
+                bad.append(f"{up.filename}: zu groß")
+                continue
+            try:
+                await asyncio.to_thread(CTX["faces"].enroll, name, data, "upload")
+                ok += 1
+            except Exception as e:
+                bad.append(f"{up.filename}: {e}")
+        if ok:
+            CTX["doorbird"].rescan_faces()
+        if not ok and not bad:
+            return _done(request.state.tok, "haus", False, "Bitte Namen und mindestens ein Foto angeben.")
+        return _done(request.state.tok, "haus", ok > 0,
+                     (f"{ok} Bild(er) für {name} angelernt." if ok else "Nichts angelernt.") + (" · " + " · ".join(bad) if bad else ""))
+
+    @app.post("/setup/faces/assign")
+    async def faces_assign(request: Request):
+        f = await request.form()
+        db = CTX["doorbird"]
+        rid, name = f.get("rid") or "", (f.get("name") or "").strip()
+        try:
+            i = int(f.get("i") or -1)
+            r, p = db.ring_by_id(rid), db.image_path(rid)
+            face = ((r or {}).get("faces") or [])[i] if i >= 0 else None
+            if not (p and face):
+                raise ValueError("Bild nicht mehr vorhanden")
+            with open(p, "rb") as fh:
+                await asyncio.to_thread(CTX["faces"].enroll, name, fh.read(), f"ring:{rid}", face)
+        except Exception as e:
+            return _done(request.state.tok, "haus", False, f"Zuordnen: {e}")
+        db.rescan_faces()
+        return _done(request.state.tok, "haus", True, f"Als {name} angelernt.")
+
+    @app.post("/setup/faces/remove")
+    async def faces_remove(request: Request):
+        f = await request.form()
+        name = f.get("name") or ""
+        CTX["faces"].remove(name, f.get("sid") or None)
+        CTX["doorbird"].rescan_faces()
+        return _done(request.state.tok, "haus", True, f"Bild von {name} gelöscht." if f.get("sid") else f"{name} gelöscht.")
 
     def _chime_part(csrf):
         ch = CTX.get("chime")
