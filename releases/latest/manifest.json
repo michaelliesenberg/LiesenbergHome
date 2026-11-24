@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.60.0",
- "file": "hub-2.60.0.tar.gz",
- "sha256": "c34453fdcd77398559c4ddf46df329d530cfcd988a974ba8c9563531c50811ac",
+ "version": "2.61.0",
+ "file": "hub-2.61.0.tar.gz",
+ "sha256": "58c807d2cd45421e26ed7c81761f7be04ebf778ecc7bf8ccfb3d0a501a994a52",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -59,6 +59,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Klingel: Gesichtserkennung nur f\u00fcr den Push-Text",
- "created": 1795512606
+ "notes": "Gesicht in der App einscannen",
+ "created": 1795515853
 }

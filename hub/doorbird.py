@@ -211,7 +211,7 @@ class DoorBird:
     def state(self):
         c = self._cfg()
         return {"configured": self.configured, "connected": self.connected, "host": c.get("host") or "",
-                "error": self.error, "rings": [r for r in self.rings if not r.get("test")][:20]}
+                "error": self.error, "rings": [_public(r) for r in self.rings if not r.get("test")][:20]}
 
     # ---- Dauerverbindung (monitor.cgi)
     def _loop(self):
@@ -290,3 +290,12 @@ class DoorBird:
             print(f"[DOORBIRD] gefunden unter {found}", flush=True)
             self.set_host(found)
         return found
+
+
+def _public(r):
+    """Klingel-Eintrag für die App: statt der Gesichtsdaten nur die erkannten Namen."""
+    out = {k: v for k, v in r.items() if k != "faces"}
+    who = [f["name"] for f in r.get("faces") or [] if f.get("name")]
+    if who:
+        out["who"] = list(dict.fromkeys(who))
+    return out

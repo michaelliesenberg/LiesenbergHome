@@ -40,8 +40,9 @@ MAX_SAMPLES = 12        # Bilder je Person
 
 
 class Faces:
-    def __init__(self, get_cfg, set_cfg):
+    def __init__(self, get_cfg, set_cfg, name_of=None):
         self.get_cfg, self.set_cfg = get_cfg, set_cfg
+        self.name_of = name_of or (lambda pid: None)   # aktueller Name eines Hub-Benutzers (Umbenennen in der App)
         self.status = "aus"            # aus | installiert … | bereit | Fehler
         self.error = None
         self._det = self._rec = None
@@ -73,7 +74,13 @@ class Faces:
         try:
             with open(DB) as f:
                 d = json.load(f)
-            return d if isinstance(d.get("people"), dict) else {"people": {}}
+            if not isinstance(d.get("people"), dict):
+                return {"people": {}}
+            for k, v in list(d["people"].items()):       # frühes Format {Name: [Bilder]} übernehmen
+                if isinstance(v, list):
+                    d["people"][_key(None, k)] = {"name": k, "pid": None, "samples": v}
+                    del d["people"][k]
+            return d
         except (OSError, ValueError, AttributeError):
             return {"people": {}}
 
@@ -83,10 +90,25 @@ class Faces:
             json.dump(self.db, f)
         os.replace(tmp, DB)
 
+    def _name(self, rec):
+        return (rec.get("pid") and self.name_of(rec["pid"])) or rec["name"]
+
     def people(self):
-        """[{name, samples: [{id, ts, src}]}] – ohne Vektoren."""
-        return [{"name": n, "samples": [{k: s.get(k) for k in ("id", "ts", "src")} for s in v]}
-                for n, v in sorted(self.db["people"].items(), key=lambda x: x[0].lower())]
+        """[{key, name, pid, samples: [{id, ts, src}]}] – ohne Vektoren."""
+        out = [{"key": k, "name": self._name(v), "pid": v.get("pid"),
+                "samples": [{x: s.get(x) for x in ("id", "ts", "src")} for s in v["samples"]]}
+               for k, v in self.db["people"].items()]
+        return sorted(out, key=lambda x: x["name"].lower())
+
+    def samples_of(self, pid):
+        rec = self.db["people"].get(_key(pid))
+        return [{x: s.get(x) for x in ("id", "ts", "src")} for s in rec["samples"]] if rec else []
+
+    def owner_of_sample(self, sid):
+        for k, v in self.db["people"].items():
+            if any(s["id"] == sid for s in v["samples"]):
+                return k
+        return None
 
     def thumb_path(self, sid):
         sid = "".join(ch for ch in str(sid) if ch.isalnum())
@@ -97,6 +119,7 @@ class Faces:
     def enable(self, on=True):
         self.set_cfg({"enabled": bool(on)})
         if on and not self.ready and not self._busy:
+            self.status, self.error = "startet …", None
             threading.Thread(target=self._prepare, daemon=True).start()
         if not on:
             self.status = "aus"
@@ -198,8 +221,9 @@ class Faces:
 
     def _match(self, feat):
         best, best_s = None, -1.0
-        for name, samples in self.db["people"].items():
-            for s in samples:
+        for rec in self.db["people"].values():
+            name = self._name(rec)
+            for s in rec["samples"]:
                 sc = float(self._np.dot(feat, self._np.asarray(s["feat"], dtype="float32")))
                 if sc > best_s:
                     best, best_s = name, sc
@@ -220,8 +244,9 @@ class Faces:
         return out
 
     # ---- Anlernen
-    def enroll(self, name, jpeg, src="upload", face=None):
-        """Gesicht aus jpeg unter name speichern. face = YuNet-Zeile (aus identify) – sonst das größte Gesicht."""
+    def enroll(self, name, jpeg, src="upload", face=None, pid=None):
+        """Gesicht aus jpeg unter name speichern (pid = Hub-Benutzer, der sein eigenes Gesicht anlernt).
+        face = Gesicht aus identify – sonst das größte Gesicht im Bild."""
         name = " ".join((name or "").split())[:40]
         if not name:
             raise ValueError("Bitte einen Namen angeben")
@@ -235,10 +260,17 @@ class Faces:
             if not rows:
                 raise ValueError("Kein Gesicht gefunden (Gesicht zu klein, zu dunkel oder zur Seite gedreht?)")
             row = rows[0]
+            if pid and len(rows) > 1 and rows[1][2] * rows[1][3] > 0.5 * row[2] * row[3]:
+                raise ValueError("Mehr als ein Gesicht im Bild – bitte allein scannen")
         feat = self._feature(img, row)
         sid = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:12]
         self._save_thumb(img, row, sid)
-        samples = self.db["people"].setdefault(name, [])
+        if not pid:              # Name von der Einrichtungsseite: gehört er einem Hub-Benutzer, dort speichern
+            pid = next((v["pid"] for v in self.db["people"].values()
+                        if v.get("pid") and self._name(v).lower() == name.lower()), None)
+        rec = self.db["people"].setdefault(_key(pid, name), {"name": name, "pid": pid, "samples": []})
+        rec["name"] = name
+        samples = rec["samples"]
         samples.append({"id": sid, "ts": int(time.time()), "src": src, "feat": [round(float(x), 5) for x in feat]})
         for old in samples[:-MAX_SAMPLES]:
             self._rm_thumb(old["id"])
@@ -278,25 +310,29 @@ class Faces:
             except OSError:
                 pass
 
-    def remove(self, name, sid=None):
-        """Ein Bild (sid) oder die ganze Person löschen."""
-        samples = self.db["people"].get(name)
-        if samples is None:
+    def remove(self, key, sid=None):
+        """Ein Bild (sid) oder die ganze Person (key aus people(), oder _key(pid)) löschen."""
+        rec = self.db["people"].get(key)
+        if rec is None:
             return False
-        keep = [s for s in samples if sid and s["id"] != sid]
-        for s in samples:
+        keep = [s for s in rec["samples"] if sid and s["id"] != sid]
+        for s in rec["samples"]:
             if s not in keep:
                 self._rm_thumb(s["id"])
         if keep:
-            self.db["people"][name] = keep
+            rec["samples"] = keep
         else:
-            del self.db["people"][name]
+            del self.db["people"][key]
         self._save()
         return True
 
     def state(self):
         return {"enabled": self.enabled, "ready": self.ready, "status": self.status if self.enabled else "aus",
                 "error": self.error, "people": [{"name": p["name"], "samples": len(p["samples"])} for p in self.people()]}
+
+
+def _key(pid, name=""):
+    return f"p:{pid}" if pid else "n:" + " ".join(name.split()).lower()
 
 
 def _sha(path):

@@ -400,7 +400,8 @@ def attach(app, ctx):
                        f'<label style="display:flex;gap:6px;align-items:center"><input style="width:auto" type=checkbox name=enabled value=1 '
                        f'{"checked" if fc.enabled else ""}>Gesichter im Klingel-Bild erkennen</label>'
                        '<div class="muted" style="font-size:12px">Beim ersten Einschalten lädt der Hub OpenCV und zwei Modelle (ca. 80 MB) – '
-                       'das dauert ein paar Minuten. Seite danach neu laden.</div>', csrf)
+                       'das dauert ein paar Minuten. Seite danach neu laden. Jeder Benutzer kann sein Gesicht auch selbst '
+                       'in der App einscannen (Haustür → Mein Gesicht).</div>', csrf)
         if not fc.enabled:
             return intro + toggle
         if not fc.ready:
@@ -415,10 +416,11 @@ def attach(app, ctx):
             thumbs = "".join(
                 f'<span style="display:inline-block;text-align:center;margin:0 6px 6px 0">'
                 f'<img src="/setup/faces/thumb/{E(x["id"])}" style="width:56px;height:56px;object-fit:cover;border-radius:10px;display:block">'
-                + _mini("/setup/faces/remove", f'<input type=hidden name=name value="{E(p["name"])}"><input type=hidden name=sid value="{E(x["id"])}">',
+                + _mini("/setup/faces/remove", f'<input type=hidden name=key value="{E(p["key"])}"><input type=hidden name=name value="{E(p["name"])}"><input type=hidden name=sid value="{E(x["id"])}">',
                         csrf, "×", "btn2") + '</span>' for x in p["samples"])
-            rows += (f'<tr><td style="vertical-align:top;width:120px"><b>{E(p["name"])}</b><br><span class=muted>{len(p["samples"])} Bild(er)</span><br>'
-                     + _mini("/setup/faces/remove", f'<input type=hidden name=name value="{E(p["name"])}">', csrf, "Person löschen", "danger")
+            app_tag = ' <span class=pill>App</span>' if p.get("pid") else ""
+            rows += (f'<tr><td style="vertical-align:top;width:120px"><b>{E(p["name"])}</b>{app_tag}<br><span class=muted>{len(p["samples"])} Bild(er)</span><br>'
+                     + _mini("/setup/faces/remove", f'<input type=hidden name=key value="{E(p["key"])}"><input type=hidden name=name value="{E(p["name"])}">', csrf, "Person löschen", "danger")
                      + f'</td><td>{thumbs}</td></tr>')
         known = (f'<table>{rows}</table>' if rows else '<p class=muted>Noch niemand angelernt.</p>')
         upload = _form("/setup/faces/upload",
@@ -523,7 +525,7 @@ def attach(app, ctx):
     async def faces_remove(request: Request):
         f = await request.form()
         name = f.get("name") or ""
-        CTX["faces"].remove(name, f.get("sid") or None)
+        CTX["faces"].remove(f.get("key") or "", f.get("sid") or None)
         CTX["doorbird"].rescan_faces()
         return _done(request.state.tok, "haus", True, f"Bild von {name} gelöscht." if f.get("sid") else f"{name} gelöscht.")
 

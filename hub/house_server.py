@@ -592,6 +592,7 @@ def people_remove(pid: str, p=Depends(owner)):
         raise HTTPException(status_code=400, detail="Du kannst dich nicht selbst entfernen")
     people.remove(pid)
     push.remove_person(pid)
+    faces.remove(_faces._key(pid))            # angelerntes Gesicht gehört der Person → mit löschen
     return {"ok": True}
 
 
@@ -2657,9 +2658,80 @@ doorbird.on_ring_start = chime.ring_async
 import faces as _faces  # noqa: E402
 
 faces = _faces.Faces(lambda: (hub_config.get("doorbird") or {}).get("faces") or {},
-                     lambda ch: hub_config.update({"doorbird": {"faces": ch}}))
+                     lambda ch: hub_config.update({"doorbird": {"faces": ch}}),
+                     lambda pid: next((x["name"] for x in people.list_people() if x["id"] == pid), None))
 doorbird.faces = faces
 faces.on_ready = lambda: doorbird.rescan_faces(only_missing=True)
+
+
+class FaceImage(BaseModel):
+    image: str                      # JPEG, Base64
+
+
+@app.get("/api/faces")
+def faces_state(p=Depends(person)):
+    """Gesichtserkennung: Status, meine angelernten Bilder; der Besitzer sieht alle Personen."""
+    st = faces.state()
+    out = {k: st[k] for k in ("enabled", "ready", "status", "error")}
+    out["mine"] = faces.samples_of(p["id"])
+    out["doorbird"] = doorbird.configured
+    if p["role"] == "owner":
+        out["people"] = [{"name": x["name"], "app": bool(x["pid"]), "samples": len(x["samples"])} for x in faces.people()]
+    return out
+
+
+@app.put("/api/faces/settings")
+def faces_settings(body: dict, p=Depends(owner)):
+    faces.enable(bool(body.get("enabled")))
+    return faces_state(p)
+
+
+@app.post("/api/faces/me")
+def faces_enroll_me(body: FaceImage, p=Depends(person)):
+    """Eigenes Gesicht anlernen (Bild von der Frontkamera der App). Das Lernen passiert hier auf dem Hub."""
+    import base64
+    if not faces.enabled:
+        raise HTTPException(status_code=409, detail="Gesichtserkennung ist ausgeschaltet – der Besitzer schaltet sie in der App ein")
+    if not faces.ready:
+        raise HTTPException(status_code=503, detail="Gesichtserkennung wird noch eingerichtet – bitte gleich nochmal")
+    try:
+        data = base64.b64decode(body.image, validate=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Bild nicht lesbar")
+    if len(data) > 8_000_000:
+        raise HTTPException(status_code=413, detail="Bild zu groß")
+    try:
+        sid = faces.enroll(p["name"], data, "app", pid=p["id"])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    doorbird.rescan_faces()
+    return {"id": sid, "mine": faces.samples_of(p["id"])}
+
+
+@app.delete("/api/faces/me")
+def faces_forget_me(p=Depends(person)):
+    faces.remove(_faces._key(p["id"]))
+    doorbird.rescan_faces()
+    return {"mine": []}
+
+
+@app.delete("/api/faces/me/{sid}")
+def faces_forget_one(sid: str, p=Depends(person)):
+    faces.remove(_faces._key(p["id"]), sid)
+    doorbird.rescan_faces()
+    return {"mine": faces.samples_of(p["id"])}
+
+
+@app.get("/api/faces/thumb/{sid}")
+def faces_thumb(sid: str, p=Depends(person)):
+    """Vorschaubild eines angelernten Bildes – nur das eigene (der Besitzer darf alle)."""
+    if p["role"] != "owner" and faces.owner_of_sample(sid) != _faces._key(p["id"]):
+        raise HTTPException(status_code=404, detail="Bild nicht vorhanden")
+    path = faces.thumb_path(sid)
+    if not path:
+        raise HTTPException(status_code=404, detail="Bild nicht vorhanden")
+    with open(path, "rb") as f:
+        return Response(f.read(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 def _jpeg(data):
