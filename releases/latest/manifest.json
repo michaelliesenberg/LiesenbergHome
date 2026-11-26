@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.62.0",
- "file": "hub-2.62.0.tar.gz",
- "sha256": "8d21a27f5e46256536c1bd5645a03840b858ac672abc5a20a4a786469022e9eb",
+ "version": "2.63.0",
+ "file": "hub-2.63.0.tar.gz",
+ "sha256": "fefe654fef7d9d52274ff3d821616801b9f4fc02b007bb0dc78c90168685de44",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -59,6 +59,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Windalarm aus der Windst\u00e4rke: Durchschnitt \u00fcber X Sekunden, B\u00f6en l\u00f6sen nicht aus",
- "created": 1795532241
+ "notes": "Ankommen f\u00fcrs ganze Haus: Ger\u00e4te + Szene",
+ "created": 1795676192
 }

@@ -1482,9 +1482,10 @@ def arrival_roads(lat: float, lon: float, refresh: bool = False, p=Depends(perso
     return {"key": key, "roads": roads, "at": cache.get("at"), "pending": True}
 
 
-# ---------------------------------------------------------------- Ankommen/Wegfahren: eigene Geräteliste je Person
-# Jede Person wählt in der App Geräte + Zustand („beim Heimkommen: Flur an, Außenlicht 60 %“), optional nur bei Dunkelheit.
-# Gespeichert hier (übersteht Neuinstallation), ausgeführt hier – das iPhone schickt beim Ankommen nur einen kurzen Befehl.
+# ---------------------------------------------------------------- Ankommen (fürs ganze Haus) / Wegfahren (je Person)
+# Geräte + Zustand („beim Heimkommen: Flur an, Außenlicht 60 %“), optional nur bei Dunkelheit.
+# „Beim Ankommen“ gilt seit 2.63.0 für ALLE Handys gleich (Schlüssel "_house", nur Besitzer/Vollzugriff ändern es),
+# „Beim Wegfahren“ bleibt je Person. Gespeichert und ausgeführt hier – das iPhone schickt nur einen kurzen Befehl.
 # Tore/Türen sind NIE Teil der Liste (das Tor öffnet die App mit ihren eigenen Regeln).
 _ARRIVAL_ACTIONS_FILE = os.path.join(hub_config.DATA_DIR, "arrival-actions.json")
 _arrival_lock = threading.Lock()
@@ -1521,10 +1522,50 @@ def _is_dark(now=None):
     return now < rise or now > sset
 
 
+_HOUSE_KEY = "_house"
+
+
+def _write_arrival(allp):
+    with open(_ARRIVAL_ACTIONS_FILE + ".tmp", "w") as f:
+        json.dump(allp, f)
+    os.replace(_ARRIVAL_ACTIONS_FILE + ".tmp", _ARRIVAL_ACTIONS_FILE)
+
+
+def _house_arrive():
+    """Globale Ankommen-Liste. Fehlt sie noch (Hub vor 2.63.0), einmalig aus der Liste einer Person übernehmen:
+    bevorzugt ein Besitzer, sonst die Person mit den meisten Geräten – und gleich speichern."""
+    with _arrival_lock:
+        allp = _arrival_actions_all()
+        if isinstance(allp.get(_HOUSE_KEY), dict):
+            return _clean_list(allp[_HOUSE_KEY].get("arrive"))
+        roles = {q["id"]: q.get("role") for q in people.list_people()}
+        cands = []
+        for pid, v in allp.items():
+            if pid == _HOUSE_KEY or not isinstance(v, dict):
+                continue
+            lst = _clean_list(v.get("arrive"))
+            if lst["actions"]:
+                cands.append((roles.get(pid) == "owner", len(lst["actions"]), pid, lst))
+        seed = max(cands, key=lambda c: c[:2])[3] if cands else _clean_list(None)
+        allp[_HOUSE_KEY] = {"arrive": seed}
+        try:
+            _write_arrival(allp)
+            if cands:
+                print(f"[ANKOMMEN] Liste fürs ganze Haus übernommen ({len(seed['actions'])} Geräte)", flush=True)
+        except OSError as e:
+            print(f"[ANKOMMEN] Speichern der Hausliste fehlgeschlagen: {e}", flush=True)
+        return seed
+
+
+def _arrival_payload(p, leave):
+    return {"arrive": _house_arrive(), "leave": leave, "dark": _is_dark(),
+            "arriveGlobal": True, "canEditArrive": bool(perms(p)["edit"])}
+
+
 @app.get("/api/arrival/actions")
 def arrival_actions_get(p=Depends(person)):
     mine = _arrival_actions_all().get(p["id"], {})
-    return {"arrive": _clean_list(mine.get("arrive")), "leave": _clean_list(mine.get("leave")), "dark": _is_dark()}
+    return _arrival_payload(p, _clean_list(mine.get("leave") if isinstance(mine, dict) else None))
 
 
 @app.put("/api/arrival/actions")
@@ -1532,20 +1573,29 @@ async def arrival_actions_put(request: Request, p=Depends(person)):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Ungültig")
+    _house_arrive()                                   # Hausliste ggf. erst anlegen (Migration), bevor wir schreiben
     with _arrival_lock:
         allp = _arrival_actions_all()
-        allp[p["id"]] = {"arrive": _clean_list(body.get("arrive")), "leave": _clean_list(body.get("leave"))}
-        with open(_ARRIVAL_ACTIONS_FILE + ".tmp", "w") as f:
-            json.dump(allp, f)
-        os.replace(_ARRIVAL_ACTIONS_FILE + ".tmp", _ARRIVAL_ACTIONS_FILE)
-    return {"arrive": allp[p["id"]]["arrive"], "leave": allp[p["id"]]["leave"], "dark": _is_dark()}
+        mine = allp.get(p["id"]) if isinstance(allp.get(p["id"]), dict) else {}
+        mine["leave"] = _clean_list(body.get("leave"))
+        mine.pop("arrive", None)                      # Ankommen steht nur noch in "_house"
+        allp[p["id"]] = mine
+        # Alte Apps schicken "arrive" immer mit – nur Besitzer/Vollzugriff dürfen die Hausliste ändern, sonst ignorieren
+        if "arrive" in body and perms(p)["edit"]:
+            allp[_HOUSE_KEY] = {"arrive": _clean_list(body.get("arrive"))}
+        _write_arrival(allp)
+    return _arrival_payload(p, mine["leave"])
 
 
 @app.post("/api/arrival/run")
 def arrival_actions_run(phase: str = "arrive", p=Depends(person)):
     if phase not in ("arrive", "leave"):
         raise HTTPException(status_code=400, detail="phase = arrive oder leave")
-    lst = _clean_list(_arrival_actions_all().get(p["id"], {}).get(phase))
+    if phase == "arrive":
+        lst = _house_arrive()
+    else:
+        mine = _arrival_actions_all().get(p["id"], {})
+        lst = _clean_list(mine.get("leave") if isinstance(mine, dict) else None)
     dark = _is_dark()
     h = home()
     if h is None:
@@ -2353,6 +2403,10 @@ class ArrivalRules(BaseModel):
     # Ankommen-Tor fürs ganze Haus (Geräte-ID, "" = keins). Wird HIER festgelegt, nicht je iPhone –
     # so kann kein Handy aus Versehen die Haustür („Door“) oder Start/Stop wählen (10.11.: Jos iPhone öffnete die Door).
     gate: str | None = None
+    # Ankommen-Szene fürs ganze Haus (ab 2.63.0; "" = keine) + eigene Szene bei Dunkelheit ("" = wie oben).
+    # Szenen mit Tor/Tür sind nicht erlaubt – das Tor öffnet nur das Ankommen-Tor oben.
+    scene: str | None = None
+    darkScene: str | None = None
 
 
 def _default_arrival_gate():
@@ -2374,7 +2428,26 @@ def _arrival_rules():
         raw, r = {}, ArrivalRules().model_dump()
     if not isinstance(raw, dict) or raw.get("gate") is None:
         r["gate"] = _default_arrival_gate()
+    r["scene"] = r.get("scene") or ""                 # nie festgelegt → keine Szene
+    r["darkScene"] = r.get("darkScene") or ""
     return r
+
+
+def _scene_by_id(sid):
+    return next((x for x in scenes.scenes if x.get("id") == sid), None) if sid else None
+
+
+def _scene_has_gate(s):
+    """Enthält die Szene ein Tor/eine Tür? (Geräteart gate oder Tor-ID gate:…)"""
+    try:
+        idx = devices.device_index(structure())
+    except Exception:
+        idx = {}
+    for a in s.get("actions", []):
+        did = _scenes.Scenes._did(a)
+        if did.startswith("gate:") or (idx.get(did) or {}).get("kind") == "gate":
+            return True
+    return False
 
 
 def _arrival_gate():
@@ -2397,7 +2470,29 @@ def arrival_rules_get(p=Depends(person)):
     gid, d = _arrival_gate()
     r["gate"] = gid or ""
     r["gateName"] = d["name"] if d else None
+    for k in ("scene", "darkScene"):
+        sc = _scene_by_id(r[k])
+        if r[k] and not sc:
+            r[k] = ""                                 # Szene inzwischen gelöscht
+        r[k + "Name"] = sc.get("name") if sc else None
     return r
+
+
+@app.post("/api/arrival/scene")
+def arrival_scene_run(p=Depends(person)):
+    """Beim Ankommen: der Hub startet SEINE Ankommen-Szene (bei Dunkelheit die Dunkel-Szene, falls festgelegt)."""
+    r = _arrival_rules()
+    dark = _is_dark()
+    sid = (r["darkScene"] if dark and r["darkScene"] else "") or r["scene"]
+    sc = _scene_by_id(sid)
+    if not sc:
+        raise HTTPException(status_code=404, detail="Keine Ankommen-Szene festgelegt")
+    try:
+        res = scenes.run(sid, "start", allow_gates=False)   # nie ein Tor über die Ankommen-Szene
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Szene nicht gefunden")
+    print(f"[ANKOMMEN] {p['name']}: Szene „{sc.get('name')}“" + (" (dunkel)" if dark else ""), flush=True)
+    return {**res, "scene": sid, "name": sc.get("name"), "dark": dark}
 
 
 @app.post("/api/arrival/gate")
@@ -2430,6 +2525,15 @@ def arrival_rules_put(body: ArrivalRules, p=Depends(can_edit)):
         d = devices.device_index(structure()).get(r["gate"])
         if not d or d.get("kind") != "gate":
             raise HTTPException(status_code=400, detail="Kein Tor")
+    for k in ("scene", "darkScene"):
+        if k not in body.model_fields_set or r[k] is None:
+            r[k] = old.get(k) or ""                   # ältere Apps schicken keine Szene mit → beibehalten
+        elif r[k]:
+            sc = _scene_by_id(r[k])
+            if not sc:
+                raise HTTPException(status_code=400, detail="Szene nicht gefunden")
+            if _scene_has_gate(sc):
+                raise HTTPException(status_code=400, detail="Szene enthält ein Tor oder eine Tür")
     if r["approachBearing"] is not None:
         r["approachBearing"] = float(r["approachBearing"]) % 360
     r["approachWidth"] = min(360.0, max(20.0, float(r["approachWidth"])))
