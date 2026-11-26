@@ -291,12 +291,11 @@ def _wrap_pedestrian(obj):
     def central_off():
         res = orig_off()
         ped = globals().get("pedestrian")
-        if ped is not None:                           # LUXOR Zentral aus trifft auch die Tor-Ausgänge → Stellung unsicher
-            ped.model.forget()
-            sg = globals().get("smart_gates")
-            if sg is not None:
-                sg.forget_all()
-            print("[TOR] Zentral aus → Torstellung unbekannt", flush=True)
+        if ped is not None:
+            # 26.11. Michael: Zentral aus schaltet die Tor-Impulsausgänge nur AUS – das bewegt kein Tor. Früher wurde hier
+            # die Schätzung gelöscht; danach galt ein per Wandtaster geöffnetes Tor als „vermutlich zu“. Ginge ein
+            # Tor-Ausgang doch an, liest SmartGates.watch() das als Taster mit.
+            print("[TOR] Zentral aus – Torstellung bleibt (Tor-Ausgänge werden mitgelesen)", flush=True)
         return res
     obj.central_off = central_off
 

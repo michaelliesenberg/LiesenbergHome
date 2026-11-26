@@ -56,7 +56,8 @@ def plan_close(est, travel, stale=gate_ped.STALE):
         return [], "fährt schon zu"
     if d == 1:
         return [{"pulse": "step"}, {"wait": 1.0}, {"pulse": "step"}], "fährt auf → anhalten, zufahren"
-    if not est["known"] or age is None or age > stale:
+    # 26.11. Michael: bekannte Stellung (auch per Wandtaster mitgelesen) gilt immer, nicht nur 10 min.
+    if not est["known"]:
         # Michael 17.11.: „Tor Süd zu“ tat bei unsicherer Stellung nichts (2.11.-Regel „vermutlich zu“) → jetzt Michaels
         # schnellster Weg: öffnen, kurz anhalten, zufahren. Aus zu/Spalt/halb offen/in Fahrt endet das zu; ein
         # geschlossenes Tor öffnet nur 1,5 s. (Früher: erst ganz auf, dann zu – öffnete 40 s.)

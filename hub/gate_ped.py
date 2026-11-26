@@ -273,8 +273,11 @@ def plan(est, travel, gap, stale=STALE):
         return [{"pulse": "step"}, w(T + M + extra)] + tail
     # lange kein Hub-Impuls → das Tor kann sich ohne den Hub bewegt haben; meist ist es dann zu.
     # Spalt öffnen: ist es doch offen, wirkt „öffnen“ nicht und der Stopp-Impuls fährt es ganz zu – nie offen stehen lassen.
+    # 26.11. Michael: bekannte Stellung (auch per Wandtaster mitgelesen) gilt immer, nicht nur 10 min – sonst schloss
+    # der Ablauf ein per Taster geöffnetes Tor ganz. Ist die Schätzung doch falsch (Handsender), endet jeder Plan mit
+    # einem geschlossenen Tor.
     age = est.get("age")
-    if d not in (1, -1) and (age is None or age > stale):
+    if d not in (1, -1) and not est["known"] and (age is None or age > stale):
         mins = "nie" if age is None else f"vor {age / 60:.0f} min"
         return list(tail), f"letzter Torbefehl über den Hub {mins} → Tor vermutlich zu, Spalt öffnen"
     # fährt gerade auf (auch bei unbekannter Stellung) und ist bald oben → abwarten, dann direkt zu

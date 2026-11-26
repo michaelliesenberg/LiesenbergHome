@@ -1,8 +1,8 @@
 {
  "name": "liesenberg-home-hub",
- "version": "2.63.0",
- "file": "hub-2.63.0.tar.gz",
- "sha256": "fefe654fef7d9d52274ff3d821616801b9f4fc02b007bb0dc78c90168685de44",
+ "version": "2.63.1",
+ "file": "hub-2.63.1.tar.gz",
+ "sha256": "ce9617177fda4a77c85bba75463369c22a297fa21a4ca82385746c93594fe01d",
  "files": [
   "appliance_learn.py",
   "attention.py",
@@ -59,6 +59,6 @@
   "VERSION",
   "wind_gate.py"
  ],
- "notes": "Ankommen f\u00fcrs ganze Haus: Ger\u00e4te + Szene",
- "created": 1795676192
+ "notes": "Tor: Wandtaster-Stellung gilt immer, Zentral aus l\u00f6scht sie nicht mehr",
+ "created": 1795680569
 }
